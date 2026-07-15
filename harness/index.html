@@ -12,6 +12,14 @@
 <body>
 <div id="host" class="vault-galaxy-root"></div>
 <script>
+// capture uncaught errors (e.g. inside requestAnimationFrame) for the dev loop
+window.__pageErrs = [];
+window.addEventListener('error', (e) => {
+  window.__pageErrs.push(e.message + ' @ ' + (e.filename || '?') + ':' + e.lineno);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  window.__pageErrs.push('unhandled rejection: ' + (e.reason && e.reason.message || e.reason));
+});
 // ---- minimal Obsidian API mock, just enough for main.js ------------------
 (function () {
   // Obsidian's DOM helpers live on HTMLElement.prototype
