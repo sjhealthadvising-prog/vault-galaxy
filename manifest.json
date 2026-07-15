@@ -1,7 +1,7 @@
 {
   "id": "vault-galaxy",
   "name": "Vault Galaxy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.5.0",
   "description": "The vault as a living 2D galaxy: core notes are suns at the center, hubs orbit them, notes orbit hubs — orbit distance encodes link strength. Choreographed orbital motion, constellation links, click to open.",
   "author": "Sam Jaber + Claude",

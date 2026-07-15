@@ -61,7 +61,12 @@ for (const f of files) {
   while ((m = mdRe.exec(text))) add(resolveTarget(m[1], f));
 }
 
+const sizes = {};
+for (const f of files) {
+  try { sizes[f] = fs.statSync(path.join(VAULT, f)).size; } catch { sizes[f] = 0; }
+}
+
 const out = path.join(__dirname, 'vault-data.json');
-fs.writeFileSync(out, JSON.stringify({ files, resolved }));
+fs.writeFileSync(out, JSON.stringify({ files, resolved, sizes }));
 const nLinks = Object.values(resolved).reduce((s, o) => s + Object.keys(o).length, 0);
 console.log(`wrote ${out}: ${files.length} files, ${nLinks} resolved link pairs`);

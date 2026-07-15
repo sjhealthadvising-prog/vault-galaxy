@@ -36,6 +36,76 @@
   color: #e6eeff;
 }
 
+.vg-panel {
+  position: absolute;
+  top: 44px;
+  right: 12px;
+  width: 220px;
+  max-height: calc(100% - 70px);
+  overflow-y: auto;
+  background: rgba(12, 16, 34, 0.92);
+  border: 1px solid rgba(120, 140, 190, 0.25);
+  border-radius: 8px;
+  padding: 10px 12px;
+  z-index: 11;
+  display: none;
+}
+
+.vg-panel.vg-open {
+  display: block;
+}
+
+.vg-sec {
+  color: #7f93bd;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 10px 0 4px;
+}
+
+.vg-sec:first-child {
+  margin-top: 0;
+}
+
+.vg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.vg-row span {
+  color: #aebedd;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.vg-row input[type="range"] {
+  width: 110px;
+}
+
+.vg-row input[type="color"] {
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.vg-reset {
+  margin-top: 10px;
+  width: 100%;
+  background: rgba(40, 50, 85, 0.6);
+  color: #aebedd;
+  border: 1px solid rgba(120, 140, 190, 0.25);
+  border-radius: 6px;
+  padding: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
 .vg-status {
   position: absolute;
   bottom: 8px;
