@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Vault Galaxy — dev harness</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #04050d; }
+  #host { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+<div id="host" class="vault-galaxy-root"></div>
+<script>
+// ---- minimal Obsidian API mock, just enough for main.js ------------------
+(function () {
+  // Obsidian's DOM helpers live on HTMLElement.prototype
+  HTMLElement.prototype.empty = function () { this.innerHTML = ''; };
+  HTMLElement.prototype.addClass = function (c) { this.classList.add(c); };
+  HTMLElement.prototype.setText = function (t) { this.textContent = t; };
+  HTMLElement.prototype.createEl = function (tag, opts) {
+    const el = document.createElement(tag);
+    if (opts && opts.cls) el.className = opts.cls;
+    if (opts && opts.text) el.textContent = opts.text;
+    this.appendChild(el);
+    return el;
+  };
+  HTMLElement.prototype.createDiv = function (opts) { return this.createEl('div', opts); };
+
+  class TFile {}
+  class Plugin {}
+  class Notice { constructor(msg) { console.log('[Notice]', msg); } }
+  class ItemView {
+    constructor(leaf) {
+      this.leaf = leaf;
+      this.app = window.__mockApp;
+      this.contentEl = document.getElementById('host');
+    }
+    registerDomEvent(el, ev, fn, opts) { el.addEventListener(ev, fn, opts); }
+    registerEvent() {}
+  }
+  window.__obsidianMock = { Plugin, ItemView, TFile, Notice };
+  window.require = function (name) {
+    if (name === 'obsidian') return window.__obsidianMock;
+    throw new Error('mock require: ' + name);
+  };
+  window.module = { exports: {} };
+})();
+
+// ---- load real vault data, build mock app, boot the view -----------------
+fetch('vault-data.json')
+  .then((r) => r.json())
+  .then((data) => {
+    window.__mockApp = {
+      vault: {
+        getMarkdownFiles: () => data.files.map((p) => ({ path: p })),
+        getAbstractFileByPath: (p) => { console.log('[open]', p); return null; },
+      },
+      metadataCache: {
+        resolvedLinks: data.resolved,
+        on: () => ({}),
+      },
+      workspace: {
+        getLeaf: () => ({ openFile: () => {} }),
+        onLayoutReady: (fn) => fn(),
+      },
+    };
+    return import('./boot.js');
+  })
+  .catch((e) => {
+    document.body.innerHTML = '<pre style="color:#f88;padding:2em">' + e + '\nRun gen-data.js first.</pre>';
+  });
+</script>
+<script type="module" src="" id="noop"></script>
+</body>
+</html>

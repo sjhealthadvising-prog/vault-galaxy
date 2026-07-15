@@ -1,0 +1,47 @@
+.vault-galaxy-root {
+  padding: 0 !important;
+  overflow: hidden;
+  position: relative;
+  background: #04050d;
+}
+
+.vg-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.vg-controls {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 10;
+}
+
+.vg-controls button {
+  background: rgba(20, 26, 48, 0.75);
+  color: #aebedd;
+  border: 1px solid rgba(120, 140, 190, 0.25);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.vg-controls button:hover {
+  background: rgba(40, 50, 85, 0.9);
+  color: #e6eeff;
+}
+
+.vg-status {
+  position: absolute;
+  bottom: 8px;
+  left: 12px;
+  font-size: 11px;
+  color: rgba(174, 190, 221, 0.55);
+  pointer-events: none;
+  z-index: 10;
+}
