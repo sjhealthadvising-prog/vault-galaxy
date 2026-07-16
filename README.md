@@ -12,6 +12,20 @@ See your Obsidian vault as a living galaxy. Your most important notes are suns a
 - **Constellations** — links draw as faint lines; hover a note to light up its constellation, slow time, and see neighbor names. Click to open the note.
 - **Fully tunable** — gravity (contracts every orbit, Kepler-consistently speeding them up), rotation speed, spiral arm count, node size, glow, link thickness/brightness, label fade threshold, and per-group colors — all live, from the ⚙ panel in the view.
 
+## Hover: the web answers
+
+Hover any note — time slows, its constellation lights up, and every linked neighbor names itself:
+
+![Hover a hub: slow-motion + lit constellation](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-hover.gif)
+
+## The evolved galaxy
+
+The spiral arms shear apart under differential rotation (inner orbits lap outer ones — real galaxies do this), so a mature session looks like a full galaxy:
+
+![The evolved galaxy at speed](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-beauty.gif)
+
+🎬 **[Watch the full playground video](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-playground.mp4)** — 36s of zooming, hovering, flinging a sun, and the speed-ramp finale.
+
 ## Screenshots
 
 | | |
