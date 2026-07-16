@@ -18,6 +18,12 @@ Hover any note — time slows, its constellation lights up, and every linked nei
 
 ![Hover a hub: slow-motion + lit constellation](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-hover.gif)
 
+## In the app
+
+The real thing — Obsidian, settings panel open, a live vault's core:
+
+![Vault Galaxy running in Obsidian](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-realapp.gif)
+
 ## The evolved galaxy
 
 The spiral arms shear apart under differential rotation (inner orbits lap outer ones — real galaxies do this), so a mature session looks like a full galaxy:
