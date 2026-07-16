@@ -2,6 +2,8 @@
 
 See your Obsidian vault as a living galaxy. Your most important notes are suns at the center; hub notes orbit them as orange stars; every other note orbits whatever it's most linked to. Orbit distance means something: **the more links a note shares with its parent, the tighter its orbit**. Everything moves — and everything you see is your real link structure.
 
+![Vault Galaxy — grab a sun and watch your knowledge web ring](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/hero.gif)
+
 ## Highlights
 
 - **Two view modes** — *galaxy* (default): unlinked notes fill a rotating spiral disc around the core, arms shearing under Kepler-style differential rotation. *expand*: each folder becomes its own labeled satellite cluster for browsing by category.
@@ -9,6 +11,13 @@ See your Obsidian vault as a living galaxy. Your most important notes are suns a
 - **Content-weighted sizes** — within each tier, node size ranks by file size. A hierarchy rule keeps it readable: the fattest note never outgrows the smallest hub, and no hub outgrows a sun.
 - **Constellations** — links draw as faint lines; hover a note to light up its constellation, slow time, and see neighbor names. Click to open the note.
 - **Fully tunable** — gravity (contracts every orbit, Kepler-consistently speeding them up), rotation speed, spiral arm count, node size, glow, link thickness/brightness, label fade threshold, and per-group colors — all live, from the ⚙ panel in the view.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![The galaxy](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/shot-hero.png) *The galaxy: suns, spiral arms, constellation links* | ![Ripple](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/shot-ripple.png) *A flung sun mid-flight — the linked web reacts* |
+| ![Expand mode](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/shot-expand.png) *Expand mode: each folder is its own satellite cluster* | ![Core](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/shot-core.png) *Zoomed into the core: hubs and their moons, labeled* |
 
 ## Zero-config start
 
