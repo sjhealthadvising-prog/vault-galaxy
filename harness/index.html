@@ -38,6 +38,8 @@ window.addEventListener('unhandledrejection', (e) => {
   class TFile {}
   class Plugin {}
   class Notice { constructor(msg) { console.log('[Notice]', msg); } }
+  class PluginSettingTab {}
+  class Setting {}
   class ItemView {
     constructor(leaf) {
       this.leaf = leaf;
@@ -47,7 +49,7 @@ window.addEventListener('unhandledrejection', (e) => {
     registerDomEvent(el, ev, fn, opts) { el.addEventListener(ev, fn, opts); }
     registerEvent() {}
   }
-  window.__obsidianMock = { Plugin, ItemView, TFile, Notice };
+  window.__obsidianMock = { Plugin, ItemView, TFile, Notice, PluginSettingTab, Setting };
   window.require = function (name) {
     if (name === 'obsidian') return window.__obsidianMock;
     throw new Error('mock require: ' + name);

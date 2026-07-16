@@ -1,32 +1,35 @@
 'use strict';
 
-/* Vault Galaxy — the vault as a living orbital galaxy.
+/* Vault Galaxy — your vault as a living orbital galaxy.
  *
- * Design: Projects/Vault Galaxy/DESIGN.md
  * Core idea: choreographed orbits, not simulated gravity. Every node gets an
  * assigned parent, radius, speed and phase -> deterministic ellipses that read
  * as physics and can never destabilize. Orbit radius encodes link strength
  * (more linked = tighter orbit). Layout is seeded by file-path hashes, so the
  * galaxy looks the same every time you open it.
+ *
+ * On top of the orbits sits a coupled displacement field: grab any node and
+ * drag it — its linked neighbors are tugged toward it (spring stiffness scales
+ * with link weight); release and the disturbed web wobbles back to rest.
  */
 
-const { Plugin, ItemView, TFile, Notice } = require('obsidian');
+const { Plugin, ItemView, TFile, Notice, PluginSettingTab, Setting } = require('obsidian');
 
 const VIEW_TYPE = 'vault-galaxy-view';
 const GOLDEN = 2.399963229728653; // golden angle, for collision-free phase spacing
 
+// fixed tiers; folder groups get palette colors (overridable in the view panel)
 const TIERS = {
-  core:     { color: '#ffd54a', label: 'core' },
-  hub:      { color: '#ff9d2e', label: 'hub' },
-  memory:   { color: '#9fc7a5', label: 'memory' },
-  domain:   { color: '#b18cff', label: 'domains' },
-  project:  { color: '#5fdd8f', label: 'Projects' },
-  research: { color: '#59c2f0', label: 'Research' },
-  resource: { color: '#e88bc4', label: 'Resources' },
-  luke:     { color: '#43d9c0', label: 'Shared w/ Luke' },
-  other:    { color: '#93a4b8', label: 'misc' },
-  archive:  { color: '#5c6470', label: 'archive' },
+  core:    { color: '#ffd54a', label: 'core' },
+  hub:     { color: '#ff9d2e', label: 'hub' },
+  other:   { color: '#93a4b8', label: 'misc' },
+  archive: { color: '#5c6470', label: 'archive' },
 };
+const GROUP_PALETTE = [
+  '#9fc7a5', '#b18cff', '#5fdd8f', '#59c2f0', '#e88bc4', '#43d9c0',
+  '#f2a65a', '#8fa8ff', '#d4c95a', '#f28b8b', '#7fd0c0', '#c39bd3',
+];
+const MAX_GROUPS = 12;
 
 // Kepler-ish speed constants per tier: omega = K / r^1.5  (rad/s at speed 1x)
 const SPEED_K = { core: 46, hub: 210, leaf: 64, anchor: 260, archive: 200, disc: 335 };
@@ -38,39 +41,40 @@ const DISC_INNER = 240;
 const DISC_SPAN = 560;
 
 const DEFAULT_SETTINGS = {
-  gravity: 1,     // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
-  speed: 1,       // rotation speed multiplier
-  arms: 3,        // spiral arms (galaxy mode)
-  nodeSize: 1,    // node radius multiplier
-  sunLabels: true, // core names always on; off = fade in on zoom like everything else
-  labelZoom: 1,   // label fade threshold: higher = must zoom in further before names appear
-  glow: 1,        // glow intensity (0 disables the glow pass)
-  linkWidth: 1,   // constellation line thickness
-  linkAlpha: 1,   // constellation line brightness
-  colors: {
-    core: '#ffd54a', hub: '#ff9d2e', memory: '#9fc7a5', domain: '#b18cff',
-    project: '#5fdd8f', research: '#59c2f0', resource: '#e88bc4',
-    luke: '#43d9c0', other: '#93a4b8', archive: '#5c6470',
-  },
+  // --- vault structure rules (Settings tab). Empty = auto-detect.
+  coreRules: '',      // one glob per line, e.g. "notes/core_*" — these become suns
+  hubRules: '',       // one glob per line — these become orange hub stars
+  archiveFolders: '', // one folder per line — rendered as dim rim debris
+  folderGroups: '',   // one folder per line for colored clusters; empty = top-level folders
+  // --- view
+  mode: 'galaxy',     // 'galaxy' | 'expand'
+  gravity: 1,         // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
+  speed: 1,           // rotation speed multiplier
+  arms: 3,            // spiral arms (galaxy mode)
+  nodeSize: 1,        // node radius multiplier
+  sunLabels: true,    // core names always on; off = fade in on zoom like everything else
+  labelZoom: 1,       // label fade threshold: higher = must zoom in further before names appear
+  glow: 1,            // glow intensity (0 disables the glow pass)
+  linkWidth: 1,       // constellation line thickness
+  linkAlpha: 1,       // constellation line brightness
+  colors: {},         // per-tier/per-group overrides, e.g. { core: '#ffd54a', 'g:Projects': '#5fdd8f' }
 };
-const SETTINGS_KEY = 'vault-galaxy-settings';
+const LEGACY_LS_SETTINGS = 'vault-galaxy-settings'; // pre-1.0 localStorage keys, migrated once
+const LEGACY_LS_MODE = 'vault-galaxy-mode';
 
-const CORE_NAMES = ['standing-orders.md', 'MEMORY.md', 'official_todo_list.md'];
+/* ------------------------------------------------- structure rules */
 
-function classify(path) {
-  const name = path.split('/').pop();
-  if (path.startsWith('memory/archive/')) return 'archive';
-  if (path.startsWith('memory/')) {
-    if (name.startsWith('core_') || CORE_NAMES.includes(name)) return 'core';
-    if (name.startsWith('hub_')) return 'hub';
-    return 'memory';
-  }
-  if (path.startsWith('domains/')) return 'domain';
-  if (path.startsWith('Projects/')) return 'project';
-  if (path.startsWith('Research/')) return 'research';
-  if (path.startsWith('Shared with Luke/') || path.startsWith('Resources/Outbound/')) return 'luke';
-  if (path.startsWith('Resources/')) return 'resource';
-  return 'other';
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function compileGlobs(text) {
+  const pats = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  const res = pats.map((p) => new RegExp('^' + p.split('*').map(escapeRe).join('.*') + '(\\.md)?$'));
+  return (path) => res.some((r) => r.test(path));
+}
+
+function compileFolders(text) {
+  const dirs = String(text || '').split(/\n+/).map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean);
+  return (path) => dirs.find((d) => path === d || path.startsWith(d + '/')) || null;
 }
 
 // --- deterministic per-path randomness so the layout is stable across opens
@@ -94,13 +98,29 @@ function prettify(path) {
 
 /* ------------------------------------------------------------------ model */
 
-function buildModel(app, mode, settings) {
+function buildModel(app, settings) {
+  const mode = settings.mode === 'expand' ? 'expand' : 'galaxy';
+  const isArchive = compileFolders(settings.archiveFolders);
+  const isCore = compileGlobs(settings.coreRules);
+  const isHub = compileGlobs(settings.hubRules);
+  const groupOf = compileFolders(settings.folderGroups);
+  const autoGroups = !String(settings.folderGroups || '').trim();
+
   const files = app.vault.getMarkdownFiles();
   const resolved = app.metadataCache.resolvedLinks || {};
 
   const nodes = new Map(); // path -> node
   for (const f of files) {
-    const tier = classify(f.path);
+    let tier;
+    if (isArchive(f.path)) tier = 'archive';
+    else if (isCore(f.path)) tier = 'core';
+    else if (isHub(f.path)) tier = 'hub';
+    else {
+      const g = groupOf(f.path);
+      if (g) tier = 'g:' + g;
+      else if (autoGroups && f.path.includes('/')) tier = 'g:' + f.path.split('/')[0];
+      else tier = 'other';
+    }
     nodes.set(f.path, {
       path: f.path, tier, label: prettify(f.path), seed: hash32(f.path),
       bytes: (f.stat && f.stat.size) || 0,
@@ -113,6 +133,21 @@ function buildModel(app, mode, settings) {
     });
   }
 
+  // cap folder groups: keep the MAX_GROUPS largest, everything else -> misc
+  const groupCounts = new Map();
+  for (const n of nodes.values()) {
+    if (n.tier.startsWith('g:')) groupCounts.set(n.tier, (groupCounts.get(n.tier) || 0) + 1);
+  }
+  const keptGroups = [...groupCounts.entries()].sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_GROUPS).map(([k]) => k);
+  const keptSet = new Set(keptGroups);
+  for (const n of nodes.values()) {
+    if (n.tier.startsWith('g:') && !keptSet.has(n.tier)) n.tier = 'other';
+  }
+  // stable palette assignment: sorted group keys -> palette order
+  const groupColors = new Map();
+  [...keptGroups].sort().forEach((k, i) => groupColors.set(k, GROUP_PALETTE[i % GROUP_PALETTE.length]));
+
   // undirected weighted adjacency from resolved links
   const edges = [];
   for (const src in resolved) {
@@ -122,11 +157,7 @@ function buildModel(app, mode, settings) {
       const b = nodes.get(dst);
       if (!b || src === dst) continue;
       const w = resolved[src][dst];
-      const had = a.adj.get(dst) || 0;
-      if (!had && !(b.adj.get(src) > 0 && src > dst)) {
-        // record edge once per unordered pair (first time either side appears)
-      }
-      a.adj.set(dst, had + w);
+      a.adj.set(dst, (a.adj.get(dst) || 0) + w);
       b.adj.set(src, (b.adj.get(src) || 0) + w);
     }
   }
@@ -141,8 +172,7 @@ function buildModel(app, mode, settings) {
     n.wdeg = [...n.adj.values()].reduce((s, v) => s + v, 0);
   }
 
-  const byTier = (t) => [...nodes.values()].filter((n) => n.tier === t);
-  const weightTo = (n, m) => (n.adj.get(m.path) || 0);
+  const weightTo = (n, m2) => (n.adj.get(m2.path) || 0);
   const bestParent = (n, candidates) => {
     let best = null, bw = 0;
     for (const c of candidates) { const w = weightTo(n, c); if (w > bw) { bw = w; best = c; } }
@@ -157,9 +187,16 @@ function buildModel(app, mode, settings) {
     n.theta = phase; // advanced incrementally each frame
   };
 
-  // --- suns (core tier), heaviest at dead center
-  let suns = byTier('core').sort((a, b) => b.wdeg - a.wdeg);
-  if (suns.length === 0) suns = [...nodes.values()].sort((a, b) => b.wdeg - a.wdeg).slice(0, 5);
+  // --- suns: rule-matched core notes, else auto-detect the most-linked notes
+  const ranked = [...nodes.values()].filter((n) => !n.isAnchor && n.tier !== 'archive')
+    .sort((a, b) => b.wdeg - a.wdeg);
+  let suns = ranked.filter((n) => n.tier === 'core');
+  if (suns.length === 0) {
+    suns = ranked.slice(0, 5).filter((n) => n.wdeg > 0);
+    if (suns.length === 0) suns = ranked.slice(0, 1); // empty-link vault: one lonely star
+    suns.forEach((n) => { n.tier = 'core'; });
+  }
+  suns.sort((a, b) => b.wdeg - a.wdeg);
   const central = suns[0];
   central.parent = null; central.orbitR = 0; central.omega = 0;
   for (let i = 1; i < suns.length; i++) {
@@ -170,8 +207,12 @@ function buildModel(app, mode, settings) {
   }
   const sunSet = new Set(suns.map((s) => s.path));
 
-  // --- hubs orbit their most-linked sun; tighter orbit = more linked (rank-based)
-  const hubs = byTier('hub');
+  // --- hubs: rule-matched, else auto-detect the next most-linked notes
+  let hubs = [...nodes.values()].filter((n) => n.tier === 'hub');
+  if (hubs.length === 0) {
+    hubs = ranked.filter((n) => !sunSet.has(n.path) && n.wdeg >= 4).slice(0, 8);
+    hubs.forEach((n) => { n.tier = 'hub'; });
+  }
   const hubKids = new Map(); // sun path -> [{hub, w}]
   for (const h of hubs) {
     const { best, bw } = bestParent(h, suns);
@@ -191,12 +232,15 @@ function buildModel(app, mode, settings) {
 
   // --- category anchors (invisible) for satellite clusters, on an outer ring
   //     (expand mode only; galaxy mode spreads unlinked notes into the disc)
-  const anchorTiers = ['domain', 'project', 'research', 'resource', 'luke', 'other'];
-  const anchors = new Map(); // tier -> anchor node
-  const present = mode === 'expand' ? anchorTiers.filter((t) => byTier(t).length > 0) : [];
+  const anchors = new Map(); // group tier -> anchor node
+  const present = mode === 'expand'
+    ? [...keptGroups, 'other'].filter((t) => [...nodes.values()].some((n) => n.tier === t && !n.isAnchor))
+    : [];
   present.forEach((t, i) => {
     const a = {
-      path: ' anchor:' + t, tier: t, label: TIERS[t].label, seed: hash32('anchor' + t),
+      path: ' anchor:' + t, tier: t,
+      label: t.startsWith('g:') ? t.slice(2).split('/').pop() : TIERS[t] ? TIERS[t].label : t,
+      seed: hash32('anchor' + t),
       wdeg: 0, adj: new Map(), parent: null, children: [], isAnchor: true,
       orbitR: 0, omega: 0, phase: 0, theta: 0, x: 0, y: 0, drawR: 0,
       ox: 0, oy: 0, vx: 0, vy: 0, nx: 0, ny: 0, fx: 0, fy: 0,
@@ -207,8 +251,8 @@ function buildModel(app, mode, settings) {
     nodes.set(a.path, a);
   });
 
-  // --- everything else: orbit best-linked hub, else best-linked sun, else its
-  //     category anchor (memory tier falls back to a mid-galaxy halo instead)
+  // --- everything else: orbit best-linked hub, else best-linked sun, else the
+  //     group anchor (expand) or the spiral disc (galaxy)
   const leafCount = new Map(); // parent path -> count so far (for sunflower spacing)
   const placeLeaf = (n, parent, tight) => {
     const idx = leafCount.get(parent.path) || 0;
@@ -230,11 +274,6 @@ function buildModel(app, mode, settings) {
     if (asHubChild.bw > 0) { placeLeaf(n, asHubChild.best, false); continue; }
     const asSunChild = bestParent(n, suns);
     if (asSunChild.bw > 0) { placeLeaf(n, asSunChild.best, true); continue; }
-    if (n.tier === 'memory') { // unlinked memory: mid-galaxy halo
-      adopt(n, central);
-      setOrbit(n, 300 + rand01(n.seed) * 90, SPEED_K.leaf, rand01(n.seed ^ 3) * 2 * Math.PI);
-      continue;
-    }
     if (mode === 'expand') {
       placeLeaf(n, anchors.get(n.tier) || anchors.get('other') || central, false);
     } else {
@@ -250,10 +289,9 @@ function buildModel(app, mode, settings) {
   }
 
   // --- draw radii: content-sized within strict tier bands. A fat note can
-  //     never outgrow the tier above it (Sam's rule: hierarchy beats content).
-  //     Sizes are RANK-normalized within each tier: smallest file in the tier
-  //     -> band min, largest -> band max. Real vaults bunch around a few KB,
-  //     so absolute scaling looks uniform; rank guarantees visible spread.
+  //     never outgrow the tier above it (hierarchy beats content). Sizes are
+  //     RANK-normalized within each tier: smallest file -> band min, largest
+  //     -> band max, so every tier shows its full visual spread.
   const bandOf = (n) => {
     if (sunSet.has(n.path)) return 'sun';
     if (hubSet.has(n.path)) return 'hub';
@@ -277,14 +315,15 @@ function buildModel(app, mode, settings) {
 
   // gravity is applied LIVE by the view each frame (r/g, omega*g^1.5), so the
   // slider feels analog instead of rebuilding to snapped positions.
-  return { nodes, edges, central, suns, sunSet, hubSet };
+  return { nodes, edges, central, suns, sunSet, hubSet, groupColors };
 }
 
 /* ------------------------------------------------------------------- view */
 
 class GalaxyView extends ItemView {
-  constructor(leaf) {
+  constructor(leaf, plugin) {
     super(leaf);
+    this.plugin = plugin;
     this.model = null;
     this.raf = 0;
     this.T = 0;               // accumulated sim time
@@ -292,8 +331,6 @@ class GalaxyView extends ItemView {
     this.timeScale = 1;
     this.paused = false;
     this.linkMode = 'auto';   // resolved to 'all' | 'hover' at build
-    this.mode = window.localStorage.getItem('vault-galaxy-mode') || 'galaxy'; // 'galaxy' | 'expand'
-    this.settings = this.loadSettings();
     this.gLive = this.settings.gravity; // eased toward the slider each frame
     this._nodeDrag = null;
     this.cam = { scale: 0.5, offX: 0, offY: 0 };
@@ -306,25 +343,19 @@ class GalaxyView extends ItemView {
     this._drag = null;
   }
 
+  get settings() { return this.plugin.settings; }
+
   getViewType() { return VIEW_TYPE; }
   getDisplayText() { return 'Vault Galaxy'; }
   getIcon() { return 'orbit'; }
 
-  loadSettings() {
-    let saved = {};
-    try { saved = JSON.parse(window.localStorage.getItem(SETTINGS_KEY)) || {}; } catch { /* defaults */ }
-    return {
-      ...DEFAULT_SETTINGS, ...saved,
-      colors: { ...DEFAULT_SETTINGS.colors, ...(saved.colors || {}) },
-    };
-  }
-
-  saveSettings() {
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings));
-  }
+  saveSettings() { this.plugin.saveSettings(); }
 
   colorOf(tier) {
-    return this.settings.colors[tier] || TIERS[tier].color;
+    const s = this.settings.colors[tier];
+    if (s) return s;
+    if (TIERS[tier]) return TIERS[tier].color;
+    return (this.model && this.model.groupColors.get(tier)) || '#93a4b8';
   }
 
   async onOpen() {
@@ -336,7 +367,7 @@ class GalaxyView extends ItemView {
     this.ctx = this.canvas.getContext('2d');
 
     const controls = root.createDiv({ cls: 'vg-controls' });
-    this.btnMode = controls.createEl('button', { text: this.mode });
+    this.btnMode = controls.createEl('button', { text: this.settings.mode });
     this.btnPause = controls.createEl('button', { text: '⏸' });
     this.btnSpeed = controls.createEl('button', { text: '1×' });
     this.btnLinks = controls.createEl('button', { text: 'links' });
@@ -344,12 +375,11 @@ class GalaxyView extends ItemView {
     this.btnRebuild = controls.createEl('button', { text: '↻' });
     this.btnGear = controls.createEl('button', { text: '⚙' });
     this.statusEl = root.createDiv({ cls: 'vg-status' });
-    this.buildPanel(root);
 
     this.registerDomEvent(this.btnMode, 'click', () => {
-      this.mode = this.mode === 'galaxy' ? 'expand' : 'galaxy';
-      window.localStorage.setItem('vault-galaxy-mode', this.mode);
-      this.btnMode.setText(this.mode);
+      this.settings.mode = this.settings.mode === 'galaxy' ? 'expand' : 'galaxy';
+      this.saveSettings();
+      this.btnMode.setText(this.settings.mode);
       this.build();
     });
     this.registerDomEvent(this.btnPause, 'click', () => {
@@ -362,15 +392,15 @@ class GalaxyView extends ItemView {
       this.saveSettings();
       this.syncSpeedUI();
     });
-    this.registerDomEvent(this.btnGear, 'click', () => {
-      this.panelEl.classList.toggle('vg-open');
-    });
     this.registerDomEvent(this.btnLinks, 'click', () => {
       this.linkMode = this.linkMode === 'all' ? 'hover' : 'all';
       this.btnLinks.setText('links: ' + this.linkMode);
     });
     this.registerDomEvent(this.btnFit, 'click', () => this.fitView());
     this.registerDomEvent(this.btnRebuild, 'click', () => { this.build(); new Notice('Galaxy rebuilt'); });
+    this.registerDomEvent(this.btnGear, 'click', () => {
+      this.panelEl.classList.toggle('vg-open');
+    });
 
     this.registerDomEvent(this.canvas, 'wheel', (e) => this.onWheel(e), { passive: false });
     this.registerDomEvent(this.canvas, 'pointerdown', (e) => this.onPointerDown(e));
@@ -389,10 +419,11 @@ class GalaxyView extends ItemView {
 
     this.syncSpeedUI();
     this.build();
+    this.buildPanel(root);
     this.resizeCanvas();
     this.fitView();
     // re-measure whenever the pane's size actually changes (covers late layout,
-    // sidebar drags, window resizes — works both in Obsidian and the harness)
+    // sidebar drags, window resizes)
     this._ro = new ResizeObserver(() => {
       this.resizeCanvas();
       if (!this._userMoved) this.fitView();
@@ -459,9 +490,14 @@ class GalaxyView extends ItemView {
     slider('link brightness', 0.2, 3, 0.1, () => s.linkAlpha, (v) => { s.linkAlpha = v; }, false);
 
     section('Colors');
-    for (const tier of Object.keys(TIERS)) {
+    const colorKeys = ['core', 'hub',
+      ...(this.model ? [...this.model.groupColors.keys()].sort() : []),
+      'other', 'archive'];
+    for (const tier of colorKeys) {
       const row = panel.createDiv({ cls: 'vg-row' });
-      row.createEl('span', { text: TIERS[tier].label });
+      row.createEl('span', {
+        text: tier.startsWith('g:') ? tier.slice(2).split('/').pop() : TIERS[tier].label,
+      });
       const inp = row.createEl('input');
       inp.type = 'color'; inp.value = this.colorOf(tier);
       this.registerDomEvent(inp, 'input', () => {
@@ -472,25 +508,30 @@ class GalaxyView extends ItemView {
 
     const reset = panel.createEl('button', { cls: 'vg-reset', text: 'reset to defaults' });
     this.registerDomEvent(reset, 'click', () => {
-      window.localStorage.removeItem(SETTINGS_KEY);
-      this.settings = this.loadSettings();
+      const keepRules = {
+        coreRules: s.coreRules, hubRules: s.hubRules,
+        archiveFolders: s.archiveFolders, folderGroups: s.folderGroups,
+      };
+      this.plugin.settings = { ...DEFAULT_SETTINGS, colors: {}, ...keepRules };
+      this.saveSettings();
       this.buildPanel(root);
       this.panelEl.classList.add('vg-open');
       this.syncSpeedUI();
+      this.btnMode.setText(this.settings.mode);
       this.build();
     });
   }
 
   build() {
     try {
-      this.model = buildModel(this.app, this.mode, this.settings);
+      this.model = buildModel(this.app, this.settings);
       if (this.linkMode === 'auto' || this.linkMode === 'all' || this.linkMode === 'hover') {
         const auto = this.model.edges.length > 2600 ? 'hover' : 'all';
         if (this.linkMode === 'auto') this.linkMode = auto;
         this.btnLinks.setText('links: ' + this.linkMode);
       }
       const nNotes = [...this.model.nodes.values()].filter((n) => !n.isAnchor).length;
-      this.statusEl.setText(`${this.mode} · ${nNotes} notes · ${this.model.edges.length} links · hover to inspect · click to open`);
+      this.statusEl.setText(`${this.settings.mode} · ${nNotes} notes · ${this.model.edges.length} links · hover to inspect · click to open · drag to disturb`);
       if (!this.stars) this.makeStars();
     } catch (e) {
       console.error('[vault-galaxy] build failed', e);
@@ -646,7 +687,7 @@ class GalaxyView extends ItemView {
     const dt = Math.min(0.05, (ts - this.lastTs) / 1000);
     this.lastTs = ts;
 
-    // eased time-scale: pause -> 0, hover -> slow-mo, else speedMult
+    // eased time-scale: pause -> 0, hover -> slow-mo, else speed setting
     const target = this.paused ? 0 : (this.hover ? 0.15 : 1) * this.settings.speed;
     this.timeScale += (target - this.timeScale) * Math.min(1, dt * 6);
     this.T += dt * this.timeScale;
@@ -749,7 +790,7 @@ class GalaxyView extends ItemView {
         const a = m.nodes.get(e.a), b = m.nodes.get(e.b);
         if (!a || !b) continue;
         if (!onScreen(a, 60) && !onScreen(b, 60)) continue;
-        const modeDim = this.mode === 'galaxy' ? 0.45 : 1; // links whisper in galaxy mode
+        const modeDim = st.mode === 'galaxy' ? 0.45 : 1; // links whisper in galaxy mode
         ctx.globalAlpha = Math.min(0.85,
           Math.min(0.16, 0.05 + e.w * 0.02) * (this.hoverSet ? 0.35 : 1) * modeDim * st.linkAlpha);
         ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
@@ -856,26 +897,109 @@ class GalaxyView extends ItemView {
   }
 }
 
+/* --------------------------------------------------------- settings tab */
+
+class GalaxySettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    const rebuildViews = () => {
+      for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+        if (leaf.view && leaf.view.build) { leaf.view.build(); leaf.view.buildPanel(leaf.view.contentEl); }
+      }
+    };
+    const textRule = (name, desc, key, placeholder) => {
+      new Setting(containerEl)
+        .setName(name)
+        .setDesc(desc)
+        .addTextArea((ta) => {
+          ta.setPlaceholder(placeholder)
+            .setValue(this.plugin.settings[key])
+            .onChange(async (v) => {
+              this.plugin.settings[key] = v;
+              await this.plugin.saveSettings();
+              rebuildViews();
+            });
+          ta.inputEl.rows = 3;
+        });
+    };
+
+    new Setting(containerEl).setName('Vault structure').setHeading();
+    containerEl.createEl('p', {
+      text: 'All fields optional — leave them empty and the galaxy auto-detects: ' +
+        'your 5 most-linked notes become suns, the next most-linked become hubs, ' +
+        'and top-level folders become colored groups. Patterns are vault paths, ' +
+        'one per line, * matches anything.',
+      cls: 'setting-item-description',
+    });
+
+    textRule('Core notes (suns)',
+      'Notes that anchor the center of the galaxy. Example: notes/index.md or MOCs/*',
+      'coreRules', 'MOCs/*\nhome.md');
+    textRule('Hub notes (orange stars)',
+      'Router/index notes that orbit the suns and collect their own moons.',
+      'hubRules', 'MOCs/sub-*');
+    textRule('Archive folders',
+      'Folders rendered as dim debris at the galaxy rim.',
+      'archiveFolders', 'archive');
+    textRule('Folder groups (colored clusters)',
+      'Folders that get their own color (and their own satellite cluster in expand mode). Empty = every top-level folder automatically.',
+      'folderGroups', 'Projects\nAreas\nResources');
+  }
+}
+
 /* ----------------------------------------------------------------- plugin */
 
 class VaultGalaxyPlugin extends Plugin {
   async onload() {
-    this.registerView(VIEW_TYPE, (leaf) => new GalaxyView(leaf));
+    await this.loadSettings();
+    this.registerView(VIEW_TYPE, (leaf) => new GalaxyView(leaf, this));
     this.addRibbonIcon('orbit', 'Open Vault Galaxy', () => this.activateView());
-    this.addCommand({ id: 'open-vault-galaxy', name: 'Open Vault Galaxy', callback: () => this.activateView() });
+    this.addCommand({ id: 'open', name: 'Open galaxy view', callback: () => this.activateView() });
+    this.addSettingTab(new GalaxySettingTab(this.app, this));
 
     // first-ever load: open the galaxy once so it introduces itself
     this.app.workspace.onLayoutReady(async () => {
-      const data = (await this.loadData()) || {};
-      if (!data.opened) {
+      if (!this.data.opened) {
         await this.activateView();
-        await this.saveData({ ...data, opened: true });
+        this.data.opened = true;
+        await this.saveSettings();
       }
     });
   }
 
-  async onunload() {
-    // Obsidian detaches our views automatically on unload
+  async loadSettings() {
+    this.data = (await this.loadData()) || {};
+    let legacy = {};
+    try {
+      // pre-1.0 versions kept settings in localStorage — migrate them once
+      if (!this.data.settings && window.localStorage.getItem(LEGACY_LS_SETTINGS)) {
+        legacy = JSON.parse(window.localStorage.getItem(LEGACY_LS_SETTINGS)) || {};
+        const mode = window.localStorage.getItem(LEGACY_LS_MODE);
+        if (mode) legacy.mode = mode;
+        window.localStorage.removeItem(LEGACY_LS_SETTINGS);
+        window.localStorage.removeItem(LEGACY_LS_MODE);
+      }
+    } catch (e) { /* defaults */ }
+    this.settings = {
+      ...DEFAULT_SETTINGS, ...legacy, ...(this.data.settings || {}),
+      colors: {
+        ...(legacy.colors || {}),
+        ...((this.data.settings || {}).colors || {}),
+      },
+    };
+    if (Object.keys(legacy).length) await this.saveSettings();
+  }
+
+  async saveSettings() {
+    this.data.settings = this.settings;
+    await this.saveData(this.data);
   }
 
   async activateView() {

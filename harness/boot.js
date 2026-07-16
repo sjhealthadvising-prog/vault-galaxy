@@ -11,6 +11,7 @@ let viewFactory = null;
 p.registerView = (_type, factory) => { viewFactory = factory; };
 p.addRibbonIcon = () => {};
 p.addCommand = () => {};
+p.addSettingTab = () => {};
 p.loadData = async () => ({ opened: true });
 p.saveData = async () => {};
 await p.onload();
