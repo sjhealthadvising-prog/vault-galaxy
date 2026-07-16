@@ -59,8 +59,6 @@ const DEFAULT_SETTINGS = {
   linkAlpha: 1,       // constellation line brightness
   colors: {},         // per-tier/per-group overrides, e.g. { core: '#ffd54a', 'g:Projects': '#5fdd8f' }
 };
-const LEGACY_LS_SETTINGS = 'vault-galaxy-settings'; // pre-1.0 localStorage keys, migrated once
-const LEGACY_LS_MODE = 'vault-galaxy-mode';
 
 /* ------------------------------------------------- structure rules */
 
@@ -976,25 +974,10 @@ class VaultGalaxyPlugin extends Plugin {
 
   async loadSettings() {
     this.data = (await this.loadData()) || {};
-    let legacy = {};
-    try {
-      // pre-1.0 versions kept settings in localStorage — migrate them once
-      if (!this.data.settings && window.localStorage.getItem(LEGACY_LS_SETTINGS)) {
-        legacy = JSON.parse(window.localStorage.getItem(LEGACY_LS_SETTINGS)) || {};
-        const mode = window.localStorage.getItem(LEGACY_LS_MODE);
-        if (mode) legacy.mode = mode;
-        window.localStorage.removeItem(LEGACY_LS_SETTINGS);
-        window.localStorage.removeItem(LEGACY_LS_MODE);
-      }
-    } catch (e) { /* defaults */ }
     this.settings = {
-      ...DEFAULT_SETTINGS, ...legacy, ...(this.data.settings || {}),
-      colors: {
-        ...(legacy.colors || {}),
-        ...((this.data.settings || {}).colors || {}),
-      },
+      ...DEFAULT_SETTINGS, ...(this.data.settings || {}),
+      colors: { ...((this.data.settings || {}).colors || {}) },
     };
-    if (Object.keys(legacy).length) await this.saveSettings();
   }
 
   async saveSettings() {
