@@ -34,6 +34,20 @@ const MAX_GROUPS = 12;
 // Kepler-ish speed constants per tier: omega = K / r^1.5  (rad/s at speed 1x)
 const SPEED_K = { core: 46, hub: 210, leaf: 64, anchor: 260, archive: 200, disc: 335 };
 
+// displacement-field physics (the interactive grab/ripple layer).
+// Damping is NOT a constant: each node gets a damping coefficient scaled to
+// its own total stiffness and mass (c = zeta * 2 * sqrt(k_total * m)), so
+// every node shares one designed damping ratio (the "bounciness" setting)
+// instead of inheriting whatever its link count implies. Mass follows tier:
+// suns lumber and carry momentum, dust gets whipped around.
+const PHYS = {
+  K_HOME: 14,   // home spring toward the natural orbit
+  K_LINK: 7,    // per-link coupling spring (scaled by link weight)
+  F_CAP: 1500,  // per-node force clamp (stability guard, not a tuning knob)
+  V_CAP: 900,   // velocity clamp — also the max throw speed
+  MASS: { sun: 10, hub: 3.5, note: 1, archive: 0.8 },
+};
+
 // galaxy-mode disc: unlinked notes seeded along spiral arms that shear
 // naturally under differential rotation
 const DISC_TWIST = 0.0045;   // rad per world-unit of radius
@@ -49,6 +63,7 @@ const DEFAULT_SETTINGS = {
   // --- view
   mode: 'galaxy',     // 'galaxy' | 'expand'
   gravity: 1,         // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
+  bounciness: 0.6,    // 0 = grabbed nodes return dead, 1 = long pendulum ring (damping ratio)
   speed: 1,           // rotation speed multiplier
   arms: 3,            // spiral arms (galaxy mode)
   nodeSize: 1,        // node radius multiplier
@@ -311,6 +326,20 @@ function buildModel(app, settings) {
     });
   }
 
+  // --- physics precompute: per-node mass (by tier) and total stiffness
+  //     (home spring + every coupling spring touching the node), so the view
+  //     can hold one designed damping ratio across the whole galaxy.
+  for (const n of nodes.values()) {
+    n.mass = n.isAnchor ? 1 : (PHYS.MASS[bandOf(n)] || 1);
+    n.kTotal = PHYS.K_HOME;
+  }
+  for (const e of edges) {
+    e.k = PHYS.K_LINK * Math.min(1, e.w / 2);
+    const a = nodes.get(e.a), b = nodes.get(e.b);
+    if (a) a.kTotal += e.k;
+    if (b) b.kTotal += e.k;
+  }
+
   // gravity is applied LIVE by the view each frame (r/g, omega*g^1.5), so the
   // slider feels analog instead of rebuilding to snapped positions.
   return { nodes, edges, central, suns, sunSet, hubSet, groupColors };
@@ -470,6 +499,7 @@ class GalaxyView extends ItemView {
 
     section('Forces');
     slider('gravity', 0.5, 1.8, 0.01, () => s.gravity, (v) => { s.gravity = v; }, false);
+    slider('bounciness', 0, 1, 0.05, () => (s.bounciness === undefined ? 0.6 : s.bounciness), (v) => { s.bounciness = v; }, false);
     this._speedSlider = slider('speed', 0, 3, 0.1, () => s.speed, (v) => { s.speed = v; this.syncSpeedUI(); }, false);
     slider('spiral arms', 1, 6, 1, () => s.arms, (v) => { s.arms = v; }, true);
 
@@ -589,15 +619,18 @@ class GalaxyView extends ItemView {
     const rect = this.canvas.getBoundingClientRect();
     this.updateHover(e.clientX - rect.left, e.clientY - rect.top);
     if (this.hover && !this.hover.isAnchor) {
-      // grab the node: drag it anywhere, gravity springs it home on release
+      // grab the node: drag it anywhere, throw it, gravity reels it home
       const n = this.hover;
-      this._nodeDrag = { node: n, x: e.clientX, y: e.clientY, ox0: n.ox, oy0: n.oy, moved: false };
+      this._nodeDrag = {
+        node: n, x: e.clientX, y: e.clientY, ox0: n.ox, oy0: n.oy, moved: false,
+        lastX: e.clientX, lastY: e.clientY, lastT: performance.now(), tvx: 0, tvy: 0,
+      };
       this._excited = true; // wake the coupled displacement field
       this.canvas.style.cursor = 'grabbing';
     } else {
       this._drag = { x: e.clientX, y: e.clientY, offX: this.cam.offX, offY: this.cam.offY, moved: false };
     }
-    this.canvas.setPointerCapture(e.pointerId);
+    try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events */ }
   }
 
   onPointerMove(e) {
@@ -609,7 +642,16 @@ class GalaxyView extends ItemView {
       if (Math.abs(dx) + Math.abs(dy) > 5) nd.moved = true;
       nd.node.ox = nd.ox0 + dx / this.cam.scale;
       nd.node.oy = nd.oy0 + dy / this.cam.scale;
-      nd.node.vx = nd.node.vy = 0;
+      nd.node.vx = nd.node.vy = 0; // held = kinematic
+      // track flick velocity (world units/s, EMA over ~40ms) for throw-on-release
+      const now = performance.now();
+      const dtm = now - nd.lastT;
+      if (dtm > 0) {
+        const w = 1 - Math.exp(-dtm / 40);
+        nd.tvx = nd.tvx * (1 - w) + (((e.clientX - nd.lastX) / this.cam.scale) / (dtm / 1000)) * w;
+        nd.tvy = nd.tvy * (1 - w) + (((e.clientY - nd.lastY) / this.cam.scale) / (dtm / 1000)) * w;
+        nd.lastX = e.clientX; nd.lastY = e.clientY; nd.lastT = now;
+      }
       return;
     }
     if (this._drag) {
@@ -633,6 +675,12 @@ class GalaxyView extends ItemView {
       if (!nd.moved && !nd.node.isAnchor) {
         const file = this.app.vault.getAbstractFileByPath(nd.node.path);
         if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
+      } else if (nd.moved) {
+        // throw: carry the flick velocity into the release (stale flick = plain drop)
+        const clamp = (v) => Math.max(-PHYS.V_CAP, Math.min(PHYS.V_CAP, v));
+        const stale = performance.now() - nd.lastT > 100;
+        nd.node.vx = stale ? 0 : clamp(nd.tvx);
+        nd.node.vy = stale ? 0 : clamp(nd.tvy);
       }
       return;
     }
@@ -724,33 +772,50 @@ class GalaxyView extends ItemView {
     // coupled displacement field: every node feels a home-spring back to its
     // natural orbit PLUS coupling springs along its links (stiffness ~ link
     // weight). Drag one node and its constellation is tugged toward it,
-    // second-order neighbors less; release and the web wobbles back to rest.
+    // second-order neighbors less; release (or THROW) and the web swings —
+    // pendulum overshoot, energy sloshing between neighbors — then re-rests.
     if (this._excited) {
-      const K_HOME = 14, C_DAMP = 9, K_LINK = 7, F_CAP = 600, V_CAP = 400;
-      const sdt = Math.min(0.033, dt); // springs run on real time, even paused
-      for (const n of m.nodes.values()) {
-        n.fx = -K_HOME * n.ox - C_DAMP * n.vx;
-        n.fy = -K_HOME * n.oy - C_DAMP * n.vy;
-      }
-      for (const e of m.edges) {
-        const a = m.nodes.get(e.a), b = m.nodes.get(e.b);
-        if (!a || !b) continue;
-        const k = K_LINK * Math.min(1, e.w / 2);
-        const dx = a.ox - b.ox, dy = a.oy - b.oy;
-        if (!dx && !dy) continue;
-        b.fx += k * dx; b.fy += k * dy;
-        a.fx -= k * dx; a.fy -= k * dy;
-      }
-      let energy = 0;
+      // bounciness -> damping ratio: 0 -> ~critically damped (dead return),
+      // 1 -> zeta 0.08 (long ring). Default 0.6 -> zeta ~0.22, 4-5 swings.
+      const b = this.settings.bounciness === undefined ? 0.6 : this.settings.bounciness;
+      const zeta = Math.max(0.05, 0.9 * Math.pow(1 - b, 2) + 0.08);
+      const total = Math.min(0.033, dt); // springs run on real time, even paused
+      const steps = total > 0.02 ? 2 : 1; // sub-step big frames for stiff-node stability
+      const sdt = total / steps;
       const clamp = (v, c) => (v > c ? c : v < -c ? -c : v);
-      for (const n of m.nodes.values()) {
-        const held = this._nodeDrag && this._nodeDrag.node === n;
-        if (!held) {
-          n.vx = clamp(n.vx + clamp(n.fx, F_CAP) * sdt, V_CAP);
-          n.vy = clamp(n.vy + clamp(n.fy, F_CAP) * sdt, V_CAP);
-          n.ox += n.vx * sdt; n.oy += n.vy * sdt;
+      let energy = 0;
+      for (let s = 0; s < steps; s++) {
+        // accumulate SPRING forces only — damping is applied implicitly below,
+        // outside the force cap, so friction survives even when the springs
+        // saturate F_CAP (capped damping was an energy leak: violent throws
+        // rang forever at high bounciness because the cap truncated friction).
+        for (const n of m.nodes.values()) {
+          n.fx = -PHYS.K_HOME * n.ox;
+          n.fy = -PHYS.K_HOME * n.oy;
         }
-        energy += Math.abs(n.ox) + Math.abs(n.oy) + Math.abs(n.vx) + Math.abs(n.vy);
+        for (const e of m.edges) {
+          const a = m.nodes.get(e.a), b2 = m.nodes.get(e.b);
+          if (!a || !b2) continue;
+          const dx = a.ox - b2.ox, dy = a.oy - b2.oy;
+          if (!dx && !dy) continue;
+          b2.fx += e.k * dx; b2.fy += e.k * dy;
+          a.fx -= e.k * dx; a.fy -= e.k * dy;
+        }
+        energy = 0;
+        for (const n of m.nodes.values()) {
+          const held = this._nodeDrag && this._nodeDrag.node === n;
+          if (!held) {
+            // damping ratio applies to the HOME mode only — heavily-linked
+            // nodes already dissipate by bleeding energy into their neighbors,
+            // so scaling cD by kTotal double-penalized them into dead returns
+            const cD = zeta * 2 * Math.sqrt(PHYS.K_HOME * n.mass);
+            const damp = 1 / (1 + (cD / n.mass) * sdt); // implicit: unconditionally stable
+            n.vx = clamp((n.vx + (clamp(n.fx, PHYS.F_CAP) / n.mass) * sdt) * damp, PHYS.V_CAP);
+            n.vy = clamp((n.vy + (clamp(n.fy, PHYS.F_CAP) / n.mass) * sdt) * damp, PHYS.V_CAP);
+            n.ox += n.vx * sdt; n.oy += n.vy * sdt;
+          }
+          energy += Math.abs(n.ox) + Math.abs(n.oy) + Math.abs(n.vx) + Math.abs(n.vy);
+        }
       }
       if (!this._nodeDrag && energy < 8) {
         for (const n of m.nodes.values()) { n.ox = n.oy = n.vx = n.vy = 0; }
