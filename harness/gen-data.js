@@ -6,7 +6,11 @@
 const fs = require('fs');
 const path = require('path');
 
-const VAULT = process.env.VAULT || path.join(process.env.HOME, 'Claude');
+const VAULT = process.env.VAULT;
+if (!VAULT) {
+  console.error('Set VAULT to your vault path, e.g. VAULT=~/notes node harness/gen-data.js');
+  process.exit(1);
+}
 const SKIP_DIRS = new Set(['.git', '.obsidian', 'node_modules', '.trash']);
 
 const files = [];
