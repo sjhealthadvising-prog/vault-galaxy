@@ -24,11 +24,11 @@ The real thing — Obsidian, settings panel open, a live vault's core:
 
 ![Vault Galaxy running in Obsidian](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-realapp.gif)
 
-## The evolved galaxy
+## At speed
 
-The spiral arms shear apart under differential rotation (inner orbits lap outer ones — real galaxies do this), so a mature session looks like a full galaxy:
+Orbits are Kepler-style — inner notes lap outer ones — so the disc keeps churning and never settles into a static picture:
 
-![The evolved galaxy at speed](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-beauty.gif)
+![The galaxy at speed](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-beauty.gif)
 
 🎬 **[Watch the full playground video](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/galaxy-playground.mp4)** — 36s of zooming, hovering, flinging a sun, and the speed-ramp finale.
 
