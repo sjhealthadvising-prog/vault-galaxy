@@ -93,6 +93,16 @@
   width: 110px;
 }
 
+.vg-row select {
+  background: rgba(20, 26, 48, 0.75);
+  color: #aebedd;
+  border: 1px solid rgba(120, 140, 190, 0.25);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 2px 4px;
+  max-width: 130px;
+}
+
 .vg-row input[type="color"] {
   width: 34px;
   height: 20px;

@@ -34,6 +34,17 @@ const MAX_GROUPS = 12;
 // Kepler-ish speed constants per tier: omega = K / r^1.5  (rad/s at speed 1x)
 const SPEED_K = { core: 46, hub: 210, leaf: 64, anchor: 260, archive: 200, disc: 335 };
 
+// planets view, multi-source lighting: every sun and hub is a light source.
+// Directionality = |weighted direction sum| / weight sum (1 = one source
+// dominates, 0 = lit evenly from all sides). Above CRISP the sharp-crescent
+// sprite renders, below SOFT the near-ambient one, crossfaded in between.
+const PLANET_LIGHT = { CRISP: 0.75, SOFT: 0.45 };
+const PLANET_LEVELS = [
+  { L: [0.87, 0, 0.5], amb: 0.16, t0: -0.06, t1: 0.22, night: 0.07 }, // crisp crescent
+  { L: [0.6, 0, 0.8], amb: 0.34, t0: -0.28, t1: 0.5, night: 0.2 },    // soft
+  { L: [0.26, 0, 0.97], amb: 0.55, t0: -0.7, t1: 0.9, night: 0.38 },  // near-ambient
+];
+
 // displacement-field physics (the interactive grab/ripple layer).
 // Damping is NOT a constant: each node gets a damping coefficient scaled to
 // its own total stiffness and mass (c = zeta * 2 * sqrt(k_total * m)), so
@@ -54,6 +65,18 @@ const DISC_TWIST = 0.0045;   // rad per world-unit of radius
 const DISC_INNER = 240;
 const DISC_SPAN = 560;
 
+// tilted (2.5D) views: fixed cinematic pitches with mild perspective. The
+// simulation never leaves the flat 2D plane — only the camera tilts, and each
+// node carries a small stable z-offset (seeded by path) so the tiers separate
+// into a bulge-and-disc profile: suns hug the mid-plane, dust scatters wide.
+const TILT = {
+  ANGLES: { flat: 0, tilt: 38 * (Math.PI / 180), steep: 62 * (Math.PI / 180) },
+  FOCAL: 2400,          // perspective distance in world units (mild foreshortening)
+  Z_BAND: { sun: 6, hub: 14, note: 38, archive: 46 }, // per-tier |z| half-band
+  SPIN_RATE: 0.02,      // idle drift speed, rad/s (~5 min per turn)
+  SPIN_IDLE_MS: 4000,   // hands-off delay before the drift resumes
+};
+
 const DEFAULT_SETTINGS = {
   // --- vault structure rules (Settings tab). Empty = auto-detect.
   coreRules: '',      // one glob per line, e.g. "notes/core_*" — these become suns
@@ -62,6 +85,11 @@ const DEFAULT_SETTINGS = {
   folderGroups: '',   // one folder per line for colored clusters; empty = top-level folders
   // --- view
   mode: 'galaxy',     // 'galaxy' | 'expand'
+  tilt: 'flat',       // camera pitch: 'flat' (2D) | 'tilt' | 'steep'
+  idleSpin: true,     // tilted views only: slow auto-drift after a few idle seconds
+  nodeStyle: 'disc',  // 'disc' (classic) | 'planet' (leaf notes as planets lit by the core)
+  corona: false,      // flaring corona on the suns and hubs (rides on the glow setting)
+  coronaStrength: 1,  // how far the corona reaches
   gravity: 1,         // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
   bounciness: 0.6,    // 0 = grabbed nodes return dead, 1 = long pendulum ring (damping ratio)
   speed: 1,           // rotation speed multiplier
@@ -103,6 +131,12 @@ function rand01(seed) { // one-shot mulberry32 step
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
 
+function tint(color, f) { // f > 0 mixes a #rrggbb toward white, f < 0 toward black
+  const n = parseInt(color.slice(1), 16);
+  const ch = (x) => Math.round(f >= 0 ? x + (255 - x) * f : x * (1 + f));
+  return `rgb(${ch((n >> 16) & 255)},${ch((n >> 8) & 255)},${ch(n & 255)})`;
+}
+
 function prettify(path) {
   let n = path.split('/').pop().replace(/\.md$/, '');
   n = n.replace(/^core_/, '').replace(/^hub_/, '').replace(/[_-]+/g, ' ');
@@ -140,6 +174,7 @@ function buildModel(app, settings) {
       wdeg: 0, adj: new Map(), // path -> weight
       parent: null, children: [],
       orbitR: 0, omega: 0, phase: 0, theta: 0, x: 0, y: 0, drawR: 3,
+      z0: 0, pf: 1, depth: 0, // tilted-view layer offset + projected size/order
       ox: 0, oy: 0, vx: 0, vy: 0, // grab-offset + spring velocity (world units)
       nx: 0, ny: 0, fx: 0, fy: 0, // natural position + coupling force accumulators
       isAnchor: false,
@@ -256,6 +291,7 @@ function buildModel(app, settings) {
       seed: hash32('anchor' + t),
       wdeg: 0, adj: new Map(), parent: null, children: [], isAnchor: true,
       orbitR: 0, omega: 0, phase: 0, theta: 0, x: 0, y: 0, drawR: 0,
+      z0: 0, pf: 1, depth: 0,
       ox: 0, oy: 0, vx: 0, vy: 0, nx: 0, ny: 0, fx: 0, fy: 0,
     };
     adopt(a, central);
@@ -320,9 +356,13 @@ function buildModel(app, settings) {
   for (const key of Object.keys(groups)) {
     const g = groups[key].sort((a, b) => a.bytes - b.bytes);
     const [lo, hi] = BANDS[key];
+    const zb = TILT.Z_BAND[key];
     g.forEach((n, i) => {
       const f = g.length > 1 ? i / (g.length - 1) : 0.7;
       n.drawR = lo + (hi - lo) * f;
+      // stable tilted-view layer: two hash draws -> triangular spread biased
+      // toward the mid-plane, so each tier reads as a soft band, not a slab
+      n.z0 = zb * (rand01(n.seed ^ 0x51AB) + rand01(n.seed ^ 0x2E7F) - 1);
     });
   }
 
@@ -340,9 +380,17 @@ function buildModel(app, settings) {
     if (b) b.kTotal += e.k;
   }
 
+  // the corona-tier bodies double as the planets-view light sources.
+  // Luminosity is sqrt(size), baked here so the render loop stays sqrt-free:
+  // strong enough that a sun outweighs a hub at equal distance (~1.5-2.2x),
+  // weak enough that a planet near its own hub faces THAT hub — size^2 let
+  // the core drown out every hub and whole clusters faced the center.
+  const lights = [...suns, ...hubs];
+  for (const l of lights) l.lum = Math.sqrt(l.drawR);
+
   // gravity is applied LIVE by the view each frame (r/g, omega*g^1.5), so the
   // slider feels analog instead of rebuilding to snapped positions.
-  return { nodes, edges, central, suns, sunSet, hubSet, groupColors };
+  return { nodes, edges, central, suns, sunSet, hubSet, groupColors, lights };
 }
 
 /* ------------------------------------------------------------------- view */
@@ -361,11 +409,19 @@ class GalaxyView extends ItemView {
     this.gLive = this.settings.gravity; // eased toward the slider each frame
     this._nodeDrag = null;
     this.cam = { scale: 0.5, offX: 0, offY: 0 };
+    this.tiltA = TILT.ANGLES[this.settings.tilt] || 0; // eased camera pitch (rad)
+    this.spinA = 0;   // idle-drift yaw (tilted views only)
+    this.spinVel = 0; // eased toward SPIN_RATE when hands-off
+    this.lastInput = 0;
+    this.pj = null;   // current frame's projection trig (null = flat)
+    this.order = [];  // painter's-order scratch list for the tilted view
     this.hover = null;
     this.hoverSet = null;
     this.dash = 0;
     this.stars = null;
     this.glowCache = new Map();
+    this.coronaCache = new Map(); // corona + planet sprites, baked once per color
+    this.planetCache = new Map();
     this._resolvedOnce = false;
     this._drag = null;
   }
@@ -395,6 +451,7 @@ class GalaxyView extends ItemView {
 
     const controls = root.createDiv({ cls: 'vg-controls' });
     this.btnMode = controls.createEl('button', { text: this.settings.mode });
+    this.btnTilt = controls.createEl('button', { text: this.settings.tilt });
     this.btnPause = controls.createEl('button', { text: '⏸' });
     this.btnSpeed = controls.createEl('button', { text: '1×' });
     this.btnLinks = controls.createEl('button', { text: 'links' });
@@ -408,6 +465,14 @@ class GalaxyView extends ItemView {
       this.saveSettings();
       this.btnMode.setText(this.settings.mode);
       this.build();
+    });
+    this.registerDomEvent(this.btnTilt, 'click', () => {
+      // camera-only cycle (flat -> tilt -> steep): the frame loop tweens the
+      // pitch, no rebuild needed
+      const next = { flat: 'tilt', tilt: 'steep', steep: 'flat' };
+      this.settings.tilt = next[this.settings.tilt] || 'flat';
+      this.saveSettings();
+      this.btnTilt.setText(this.settings.tilt);
     });
     this.registerDomEvent(this.btnPause, 'click', () => {
       this.paused = !this.paused;
@@ -506,6 +571,21 @@ class GalaxyView extends ItemView {
     section('Display');
     {
       const row = panel.createDiv({ cls: 'vg-row' });
+      row.createEl('span', { text: 'node style' });
+      const sel = row.createEl('select');
+      for (const [val, name] of [['disc', 'Classic'], ['planet', 'Planets']]) {
+        const opt = sel.createEl('option', { text: name });
+        opt.value = val;
+      }
+      sel.value = s.nodeStyle || 'disc';
+      this.registerDomEvent(sel, 'change', () => {
+        s.nodeStyle = sel.value;
+        this.saveSettings();
+      });
+      this._styleSelect = sel; // kept in sync by the settings-tab dropdown
+    }
+    {
+      const row = panel.createDiv({ cls: 'vg-row' });
       row.createEl('span', { text: 'core names always on' });
       const inp = row.createEl('input');
       inp.type = 'checkbox'; inp.checked = s.sunLabels;
@@ -514,6 +594,16 @@ class GalaxyView extends ItemView {
     slider('node size', 0.5, 2.2, 0.05, () => s.nodeSize, (v) => { s.nodeSize = v; }, false);
     slider('label threshold', 0.3, 3, 0.05, () => s.labelZoom, (v) => { s.labelZoom = v; }, false);
     slider('glow', 0, 2, 0.05, () => s.glow, (v) => { s.glow = v; }, false);
+    {
+      const row = panel.createDiv({ cls: 'vg-row' });
+      row.createEl('span', { text: 'corona' });
+      const inp = row.createEl('input');
+      inp.type = 'checkbox'; inp.checked = !!s.corona;
+      this.registerDomEvent(inp, 'change', () => { s.corona = inp.checked; this.saveSettings(); });
+      this._coronaCheck = inp; // kept in sync by the settings tab
+    }
+    this._coronaSlider = slider('corona strength', 0.2, 2.5, 0.05,
+      () => (s.coronaStrength === undefined ? 1 : s.coronaStrength), (v) => { s.coronaStrength = v; }, false);
     slider('link thickness', 0.4, 3, 0.1, () => s.linkWidth, (v) => { s.linkWidth = v; }, false);
     slider('link brightness', 0.2, 3, 0.1, () => s.linkAlpha, (v) => { s.linkAlpha = v; }, false);
 
@@ -546,6 +636,7 @@ class GalaxyView extends ItemView {
       this.panelEl.classList.add('vg-open');
       this.syncSpeedUI();
       this.btnMode.setText(this.settings.mode);
+      this.btnTilt.setText(this.settings.tilt);
       this.build();
     });
   }
@@ -553,6 +644,7 @@ class GalaxyView extends ItemView {
   build() {
     try {
       this.model = buildModel(this.app, this.settings);
+      this.order = [...this.model.nodes.values()];
       if (this.linkMode === 'auto' || this.linkMode === 'all' || this.linkMode === 'hover') {
         const auto = this.model.edges.length > 2600 ? 'hover' : 'all';
         if (this.linkMode === 'auto') this.linkMode = auto;
@@ -605,6 +697,7 @@ class GalaxyView extends ItemView {
   onWheel(e) {
     e.preventDefault();
     this._userMoved = true;
+    this.lastInput = performance.now();
     const f = Math.exp(-e.deltaY * 0.0012);
     const ns = Math.min(6, Math.max(0.08, this.cam.scale * f));
     const rect = this.canvas.getBoundingClientRect();
@@ -617,13 +710,18 @@ class GalaxyView extends ItemView {
 
   onPointerDown(e) {
     const rect = this.canvas.getBoundingClientRect();
-    this.updateHover(e.clientX - rect.left, e.clientY - rect.top);
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    this.lastInput = performance.now();
+    this.updateHover(mx, my);
     if (this.hover && !this.hover.isAnchor) {
-      // grab the node: drag it anywhere, throw it, gravity reels it home
+      // grab the node: drag it anywhere, throw it, gravity reels it home.
+      // Pointer positions are cast onto the node's own plane layer, so the
+      // identical world-space grab math drives both the flat and tilted views.
       const n = this.hover;
+      const w = this.unproject(mx, my, n.z0);
       this._nodeDrag = {
         node: n, x: e.clientX, y: e.clientY, ox0: n.ox, oy0: n.oy, moved: false,
-        lastX: e.clientX, lastY: e.clientY, lastT: performance.now(), tvx: 0, tvy: 0,
+        wx: w.x, wy: w.y, lastWX: w.x, lastWY: w.y, lastT: performance.now(), tvx: 0, tvy: 0,
       };
       this._excited = true; // wake the coupled displacement field
       this.canvas.style.cursor = 'grabbing';
@@ -636,21 +734,22 @@ class GalaxyView extends ItemView {
   onPointerMove(e) {
     const rect = this.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    this.lastInput = performance.now();
     if (this._nodeDrag) {
       const nd = this._nodeDrag;
-      const dx = e.clientX - nd.x, dy = e.clientY - nd.y;
-      if (Math.abs(dx) + Math.abs(dy) > 5) nd.moved = true;
-      nd.node.ox = nd.ox0 + dx / this.cam.scale;
-      nd.node.oy = nd.oy0 + dy / this.cam.scale;
+      if (Math.abs(e.clientX - nd.x) + Math.abs(e.clientY - nd.y) > 5) nd.moved = true;
+      const w = this.unproject(mx, my, nd.node.z0);
+      nd.node.ox = nd.ox0 + (w.x - nd.wx);
+      nd.node.oy = nd.oy0 + (w.y - nd.wy);
       nd.node.vx = nd.node.vy = 0; // held = kinematic
       // track flick velocity (world units/s, EMA over ~40ms) for throw-on-release
       const now = performance.now();
       const dtm = now - nd.lastT;
       if (dtm > 0) {
-        const w = 1 - Math.exp(-dtm / 40);
-        nd.tvx = nd.tvx * (1 - w) + (((e.clientX - nd.lastX) / this.cam.scale) / (dtm / 1000)) * w;
-        nd.tvy = nd.tvy * (1 - w) + (((e.clientY - nd.lastY) / this.cam.scale) / (dtm / 1000)) * w;
-        nd.lastX = e.clientX; nd.lastY = e.clientY; nd.lastT = now;
+        const k = 1 - Math.exp(-dtm / 40);
+        nd.tvx = nd.tvx * (1 - k) + ((w.x - nd.lastWX) / (dtm / 1000)) * k;
+        nd.tvy = nd.tvy * (1 - k) + ((w.y - nd.lastWY) / (dtm / 1000)) * k;
+        nd.lastWX = w.x; nd.lastWY = w.y; nd.lastT = now;
       }
       return;
     }
@@ -687,6 +786,27 @@ class GalaxyView extends ItemView {
     this._drag = null;
   }
 
+  // cast a screen point back through the camera onto the simulation plane
+  // (the layer z of the node being grabbed). The flat view reduces to plain
+  // scale/offset, so one path serves both modes and drags stay in world units.
+  unproject(mx, my, z0) {
+    const px = (mx - this.cam.offX) / this.cam.scale;
+    const py = (my - this.cam.offY) / this.cam.scale;
+    if (!this.pj) return { x: px, y: py };
+    const { sinT, cosT, sinS, cosS, zs } = this.pj;
+    const z = z0 * zs;
+    const F = TILT.FOCAL;
+    // invert py = (yr*cosT - z*sinT) * F / (F - yr*sinT - z*cosT) for yr, then
+    // recover xr from the same perspective factor. Clamped well inside the
+    // horizon so a wild pointer can never flip the ray behind the camera.
+    let yr = (py * (F - z * cosT) + F * z * sinT) / (F * cosT + py * sinT);
+    if (!isFinite(yr)) yr = py;
+    yr = Math.max(-2600, Math.min(2600, yr));
+    const p = F / (F - yr * sinT - z * cosT);
+    const xr = px / p;
+    return { x: xr * cosS + yr * sinS, y: yr * cosS - xr * sinS };
+  }
+
   updateHover(mx, my) {
     if (!this.model) return;
     let best = null, bd = 1e9;
@@ -694,7 +814,7 @@ class GalaxyView extends ItemView {
       if (n.isAnchor) continue;
       const dx = n.sx - mx, dy = n.sy - my;
       const d = Math.hypot(dx, dy);
-      const hitR = Math.max(7, n.drawR * this.settings.nodeSize * this.cam.scale + 4);
+      const hitR = Math.max(7, n.drawR * this.settings.nodeSize * this.cam.scale * n.pf + 4);
       if (d < hitR && d < bd) { bd = d; best = n; }
     }
     if (best !== this.hover) {
@@ -729,6 +849,104 @@ class GalaxyView extends ItemView {
     return c;
   }
 
+  // corona for the big bodies: layered bloom in the body's own color plus
+  // ray spikes — broad soft drama on the suns; hotter, denser flare on the
+  // hubs so the "lesser sun" reads at their much smaller on-screen size.
+  // Drawn additively in the glow pass in place of the standard glow.
+  coronaSprite(color, kind) {
+    const key = color + '|' + kind;
+    let c = this.coronaCache.get(key);
+    if (!c) {
+      const s = 128;
+      const sun = kind === 'sun';
+      c = document.createElement('canvas');
+      c.width = c.height = s * 2;
+      const g = c.getContext('2d');
+      const grad = g.createRadialGradient(s, s, 0, s, s, s);
+      // hubs are "lesser suns": their bodies are far smaller, so a scaled-down
+      // copy of the sun sprite just melts into the standard glow it replaces.
+      // Instead the hub sprite runs hotter — brighter bloom stops end to end,
+      // with full-length, much thicker, whiter spikes so the cross-flare
+      // still reads at the small sizes hubs render at.
+      grad.addColorStop(0, color + (sun ? 'd9' : 'ee'));
+      grad.addColorStop(0.2, color + (sun ? '66' : '88'));
+      grad.addColorStop(0.5, color + (sun ? '1f' : '2e'));
+      grad.addColorStop(1, color + '00');
+      g.fillStyle = grad;
+      g.beginPath(); g.arc(s, s, s, 0, 6.2832); g.fill();
+      for (const [dx, dy, f] of [[1, 0, 1], [-1, 0, 1], [0, 1, 0.8], [0, -1, 0.8]]) {
+        const len = s * f;
+        const sp = g.createLinearGradient(s, s, s + dx * len, s + dy * len);
+        sp.addColorStop(0, 'rgba(255,255,255,' + (sun ? 0.4 : 0.5) + ')');
+        sp.addColorStop(0.25, color + (sun ? '33' : '3d'));
+        sp.addColorStop(1, color + '00');
+        g.strokeStyle = sp;
+        // hub spikes are proportionally much thicker and whiter: the hub
+        // sprite renders at a fraction of the sun's on-screen size, so
+        // sun-ratio spikes would downscale to under a pixel and vanish
+        g.lineWidth = s * (sun ? 0.035 : 0.09);
+        g.beginPath(); g.moveTo(s, s); g.lineTo(s + dx * len, s + dy * len); g.stroke();
+      }
+      this.coronaCache.set(key, c);
+    }
+    return c;
+  }
+
+  // planets-view leaf: a lit sphere baked once per color and contrast level —
+  // Lambert falloff with a soft terminator, color-tinted atmosphere on the
+  // lit limb, night side sinking into deep blue. Each level bakes a more
+  // head-on light and higher ambient (crisp crescent -> near-ambient); the
+  // draw call picks levels by light directionality and rotates the sprite so
+  // the lit side faces the blended light direction.
+  planetSprite(color, level) {
+    const key = color + '|' + level;
+    let c = this.planetCache.get(key);
+    if (!c) {
+      const { L, amb, t0, t1, night } = PLANET_LEVELS[level];
+      const r = 56, halo = 1.25, R = Math.ceil(r * halo) + 1, size = R * 2;
+      c = document.createElement('canvas');
+      c.width = c.height = size;
+      const g = c.getContext('2d');
+      const img = g.createImageData(size, size);
+      const px = img.data;
+      const nCol = parseInt(color.slice(1), 16);
+      const ar = (nCol >> 16) & 255, ag = (nCol >> 8) & 255, ab = nCol & 255;
+      const smooth = (a, b, x) => { const k = Math.max(0, Math.min(1, (x - a) / (b - a))); return k * k * (3 - 2 * k); };
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const u = (x - R + 0.5) / r, v = (y - R + 0.5) / r;
+          const d = Math.hypot(u, v);
+          const i = (y * size + x) * 4;
+          if (d <= 1.004) {
+            const nz = Math.sqrt(Math.max(0, 1 - u * u - v * v));
+            const ndl = u * L[0] + v * L[1] + nz * L[2];
+            const t = smooth(t0, t1, ndl); // soft terminator
+            const diff = amb + (1 - amb) * Math.pow(Math.max(0, ndl), 1.15);
+            const nr = ar * night + 6, ng = ag * night + 8, nb = ab * night + 18;
+            let cr = nr + (ar * diff - nr) * t;
+            let cg = ng + (ag * diff - ng) * t;
+            let cb = nb + (ab * diff - nb) * t;
+            const fres = Math.pow(1 - nz, 2.8) * (0.25 + 0.75 * t) * 0.7;
+            cr += (ar + (255 - ar) * 0.35) * fres;
+            cg += (ag + (255 - ag) * 0.35) * fres;
+            cb += (ab + (255 - ab) * 0.35) * fres;
+            px[i] = Math.min(255, cr); px[i + 1] = Math.min(255, cg); px[i + 2] = Math.min(255, cb);
+            px[i + 3] = 255 * Math.max(0, Math.min(1, (1 - d) * r * 2 + 0.5));
+          } else if (d < halo) {
+            // atmosphere halo just outside the body, brightest on the lit edge
+            const h = 1 - (d - 1) / (halo - 1);
+            const lit = Math.max(0, (u * L[0]) / d);
+            px[i] = ar + (255 - ar) * 0.4; px[i + 1] = ag + (255 - ag) * 0.4; px[i + 2] = ab + (255 - ab) * 0.4;
+            px[i + 3] = 255 * h * h * (0.25 + 0.75 * lit) * 0.35;
+          }
+        }
+      }
+      g.putImageData(img, 0, 0);
+      this.planetCache.set(key, c);
+    }
+    return c;
+  }
+
   frame(ts) {
     const dt = Math.min(0.05, (ts - this.lastTs) / 1000);
     this.lastTs = ts;
@@ -738,6 +956,24 @@ class GalaxyView extends ItemView {
     this.timeScale += (target - this.timeScale) * Math.min(1, dt * 6);
     this.T += dt * this.timeScale;
     this.dash -= dt * 26;
+
+    // tilted-view camera: ease the pitch toward the chosen step; the idle
+    // drift runs hands-off in the tilted views only and unwinds on the way
+    // flat, so the 2D view always lands back pixel-exact.
+    const tiltGoal = TILT.ANGLES[this.settings.tilt] || 0;
+    this.tiltA += (tiltGoal - this.tiltA) * Math.min(1, dt * 3);
+    if (Math.abs(this.tiltA - tiltGoal) < 0.0005) this.tiltA = tiltGoal;
+    if (tiltGoal > 0) {
+      const idle = this.settings.idleSpin && !this._nodeDrag && !this._drag &&
+        ts - this.lastInput > TILT.SPIN_IDLE_MS;
+      this.spinVel += ((idle ? TILT.SPIN_RATE : 0) - this.spinVel) * Math.min(1, dt * 2);
+      this.spinA += this.spinVel * dt;
+      if (this.spinA > Math.PI) this.spinA -= 2 * Math.PI; // keep the yaw wrapped
+    } else if (this.spinA !== 0) {
+      this.spinVel = 0;
+      this.spinA *= Math.max(0, 1 - dt * 3);
+      if (Math.abs(this.spinA) < 0.0005) this.spinA = 0;
+    }
 
     const m = this.model;
     if (!m || !this.ctx) return;
@@ -823,7 +1059,35 @@ class GalaxyView extends ItemView {
       }
     }
     for (const n of m.nodes.values()) { n.x = n.nx + n.ox; n.y = n.ny + n.oy; }
-    for (const n of m.nodes.values()) { n.sx = n.x * scale + offX; n.sy = n.y * scale + offY; }
+    const proj = this.tiltA > 0 || this.spinA !== 0;
+    if (!proj) {
+      if (this.pj) { // just landed flat: clear the last tween frame's residue
+        for (const n of m.nodes.values()) { n.pf = 1; n.depth = 0; }
+        this.pj = null;
+      }
+      for (const n of m.nodes.values()) { n.sx = n.x * scale + offX; n.sy = n.y * scale + offY; }
+    } else {
+      // rotate the plane about the screen X axis with mild perspective. Trig
+      // is hoisted out of the loop; per-node cost is a handful of multiplies.
+      const sinT = Math.sin(this.tiltA), cosT = Math.cos(this.tiltA);
+      const sinS = Math.sin(this.spinA), cosS = Math.cos(this.spinA);
+      // z-offsets are fully grown by the first tilt step and hold from there
+      const zs = Math.min(1, this.tiltA / TILT.ANGLES.tilt);
+      this.pj = { sinT, cosT, sinS, cosS, zs };
+      for (const n of m.nodes.values()) {
+        const xr = n.x * cosS - n.y * sinS;
+        const yr = n.x * sinS + n.y * cosS;
+        const z = n.z0 * zs;
+        const zc = yr * sinT + z * cosT; // camera depth (+ = toward the viewer)
+        const p = TILT.FOCAL / (TILT.FOCAL - zc);
+        n.pf = p;
+        n.depth = zc;
+        n.sx = xr * p * scale + offX;
+        n.sy = (yr * cosT - z * sinT) * p * scale + offY;
+      }
+      // painter's order: far nodes first, near nodes drawn over them
+      this.order.sort((u, v) => u.depth - v.depth);
+    }
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.fillStyle = '#04050d';
@@ -876,6 +1140,13 @@ class GalaxyView extends ItemView {
       ctx.globalAlpha = 1;
     }
 
+    // node style: 'disc' keeps today's look everywhere; 'planet' keeps the
+    // suns and hubs classic and renders everything below them as shaded
+    // planets lit by the core. The corona toggle is independent of both.
+    const ns = st.nodeStyle || 'disc';
+    const coronaOn = !!st.corona;
+    const coronaCs = st.coronaStrength === undefined ? 1 : st.coronaStrength;
+
     // glow pass (additive)
     if (st.glow > 0) {
       ctx.globalCompositeOperation = 'lighter';
@@ -883,10 +1154,35 @@ class GalaxyView extends ItemView {
       for (const n of m.nodes.values()) {
         if (n.isAnchor || !onScreen(n, 80)) continue;
         const isSun = m.sunSet.has(n.path), isHub = m.hubSet.has(n.path);
-        if (!isSun && !isHub && scale < 0.2) continue; // skip tiny glows when far out
-        const dim = this.hoverSet && !this.hoverSet.has(n.path) ? 0.35 : 1;
+        // planets view: only the stars (suns + hubs) are emitters — planets
+        // are lit bodies and get no glow halo (their sprite's baked atmosphere
+        // rim stays). Classic view keeps glow on everything, as always.
+        if (!isSun && !isHub && (ns === 'planet' || scale < 0.2)) continue; // also skip tiny glows when far out
+        // pf is the perspective factor (1 in flat view): near nodes render
+        // larger and brighter, far ones smaller and dimmer
+        const dim = (this.hoverSet && !this.hoverSet.has(n.path) ? 0.35 : 1) *
+          Math.max(0.45, Math.min(1, 1 + (n.pf - 1) * 1.6));
         const pulse = isSun ? 1 + 0.05 * Math.sin(this.T * 0.9 + n.seed % 7) : 1;
-        const gs = n.drawR * st.nodeSize * (isSun ? 5.5 : isHub ? 4.2 : 3) * scale * pulse * glowSize;
+        if (coronaOn && (isSun || isHub)) {
+          // corona replaces the standard glow on the big bodies. Its reach
+          // rides on the glow setting multiplicatively; the strength slider
+          // then scales it further on its own axis. The hub multiplier must
+          // clearly beat the 4.2x standard glow it replaces (a same-size
+          // corona is invisible in practice — that was the bug); in absolute
+          // pixels hubs still land a distinct step below the suns because
+          // their bodies are 2-5x smaller. The smallest hubs borrow a size
+          // floor for the corona only (lesser suns flare disproportionately)
+          // or their coronas degenerate to a few pixels. Hub alpha fades on
+          // sqrt(glow) instead of glow: their bodies are too small to stay
+          // visible if a low glow setting crushes both reach AND alpha (suns
+          // survive on sheer size; hubs vanished).
+          const br = (isSun ? n.drawR : Math.max(n.drawR, 8)) * st.nodeSize * scale * pulse * n.pf;
+          const cr = Math.min(320, br * (isSun ? 5.2 : 5.6) * glowSize * coronaCs);
+          ctx.globalAlpha = (isSun ? 0.95 * Math.min(1, st.glow) : 0.9 * Math.min(1, glowSize)) * dim;
+          ctx.drawImage(this.coronaSprite(this.colorOf(n.tier), isSun ? 'sun' : 'hub'), n.sx - cr, n.sy - cr, cr * 2, cr * 2);
+          continue;
+        }
+        const gs = n.drawR * st.nodeSize * (isSun ? 5.5 : isHub ? 4.2 : 3) * scale * pulse * glowSize * n.pf;
         const spr = this.glow(this.colorOf(n.tier), Math.min(160, gs));
         ctx.globalAlpha = (isSun ? 0.95 : isHub ? 0.8 : 0.5) * dim * Math.min(1, st.glow);
         ctx.drawImage(spr, n.sx - gs, n.sy - gs, gs * 2, gs * 2);
@@ -895,30 +1191,81 @@ class GalaxyView extends ItemView {
       ctx.globalAlpha = 1;
     }
 
-    // solid bodies
-    for (const n of m.nodes.values()) {
+    // solid bodies (far-to-near when tilted, so near nodes overdraw far ones)
+    for (const n of (proj ? this.order : m.nodes.values())) {
       if (n.isAnchor || !onScreen(n, 30)) continue;
       const isSun = m.sunSet.has(n.path);
-      const dim = this.hoverSet && !this.hoverSet.has(n.path) ? 0.3 : 1;
+      const dim = (this.hoverSet && !this.hoverSet.has(n.path) ? 0.3 : 1) *
+        Math.max(0.45, Math.min(1, 1 + (n.pf - 1) * 1.6));
       const pulse = isSun ? 1 + 0.04 * Math.sin(this.T * 0.9 + n.seed % 7) : 1;
-      const r = Math.max(0.7, n.drawR * st.nodeSize * scale * pulse);
+      const r = Math.max(0.7, n.drawR * st.nodeSize * scale * pulse * n.pf);
       ctx.globalAlpha = dim;
-      ctx.fillStyle = this.colorOf(n.tier);
-      ctx.beginPath(); ctx.arc(n.sx, n.sy, r, 0, 6.2832); ctx.fill();
-      if (isSun) { // hot white center
-        ctx.fillStyle = '#fff7d8';
-        ctx.beginPath(); ctx.arc(n.sx, n.sy, r * 0.45, 0, 6.2832); ctx.fill();
+      if (ns === 'planet' && !isSun && !m.hubSet.has(n.path)) {
+        // multi-source lighting: every sun and hub pulls the lit side toward
+        // itself, weighted by luminosity (sqrt of size, baked as .lum at
+        // build) over distance squared. Why so flat: size^2 luminosity let
+        // the core drown out every hub, so whole clusters faced the center
+        // instead of their own hub. sqrt keeps a real ordering (a sun still
+        // outweighs a hub ~1.5-2.2x at equal distance) while letting each
+        // hub's own planets face THEIR hub; the core wins only when it is
+        // genuinely closer or comparable. The resultant's direction aims the
+        // sprite; its magnitude relative to the total weight says how
+        // directional the light is — surrounded by comparable sources, the
+        // shading washes toward ambient.
+        let lvx = 0, lvy = 0, lw = 0;
+        for (const src of m.lights) {
+          const ldx = src.sx - n.sx, ldy = src.sy - n.sy;
+          const ld2 = Math.max(1, ldx * ldx + ldy * ldy);
+          const w = src.lum / ld2;
+          const inv = 1 / Math.sqrt(ld2);
+          lvx += w * ldx * inv; lvy += w * ldy * inv; lw += w;
+        }
+        const dirness = lw > 0 ? Math.hypot(lvx, lvy) / lw : 1;
+        const lvl = Math.min(1.999, dirness >= PLANET_LIGHT.CRISP ? 0
+          : dirness >= PLANET_LIGHT.SOFT
+            ? (PLANET_LIGHT.CRISP - dirness) / (PLANET_LIGHT.CRISP - PLANET_LIGHT.SOFT)
+            : 1 + (PLANET_LIGHT.SOFT - dirness) / PLANET_LIGHT.SOFT);
+        const li = Math.floor(lvl);
+        const col = this.colorOf(n.tier);
+        const pr = r * 1.25; // sprite reaches past the body for the halo
+        ctx.save();
+        ctx.translate(n.sx, n.sy);
+        ctx.rotate(Math.atan2(lvy, lvx));
+        ctx.drawImage(this.planetSprite(col, li), -pr, -pr, pr * 2, pr * 2);
+        if (lvl - li > 0.02) { // crossfade into the next level, no popping
+          ctx.globalAlpha = dim * (lvl - li);
+          ctx.drawImage(this.planetSprite(col, li + 1), -pr, -pr, pr * 2, pr * 2);
+        }
+        ctx.restore();
+      } else {
+        ctx.fillStyle = this.colorOf(n.tier);
+        ctx.beginPath(); ctx.arc(n.sx, n.sy, r, 0, 6.2832); ctx.fill();
+        if (isSun) { // hot white center
+          ctx.fillStyle = '#fff7d8';
+          ctx.beginPath(); ctx.arc(n.sx, n.sy, r * 0.45, 0, 6.2832); ctx.fill();
+        }
       }
     }
     ctx.globalAlpha = 1;
 
-    // labels (screen space)
+    // labels (screen space, always billboarded — flat and screen-facing at
+    // every camera angle; in the tilted views depth reads through size only,
+    // perspective-scaled within a legibility clamp)
     const label = (n, font, alpha, dy) => {
       ctx.font = font;
       ctx.globalAlpha = alpha;
       ctx.fillStyle = '#dde6f5';
       ctx.textAlign = 'center';
-      ctx.fillText(n.label, n.sx, n.sy + dy);
+      if (this.pj) {
+        const lp = Math.max(0.85, Math.min(1.3, n.pf));
+        ctx.save();
+        ctx.translate(n.sx, n.sy + dy);
+        ctx.scale(lp, lp);
+        ctx.fillText(n.label, 0, 0);
+        ctx.restore();
+      } else {
+        ctx.fillText(n.label, n.sx, n.sy + dy);
+      }
     };
     const ls = scale / st.labelZoom; // label-gating zoom: threshold slider shifts when names appear
     for (const n of m.nodes.values()) {
@@ -929,7 +1276,7 @@ class GalaxyView extends ItemView {
         if (ls > 0.25 && !this.hoverSet) label(n, 'italic 11px sans-serif', 0.28, 4);
         continue;
       }
-      const lr = n.drawR * st.nodeSize * scale;
+      const lr = n.drawR * st.nodeSize * scale * n.pf;
       if (m.sunSet.has(n.path)) {
         if (st.sunLabels) {
           if (!dimmed) label(n, 'bold 12px sans-serif', 0.9, lr + 14);
@@ -1014,6 +1361,60 @@ class GalaxySettingTab extends PluginSettingTab {
     textRule('Folder groups (colored clusters)',
       'Folders that get their own color (and their own satellite cluster in expand mode). Empty = every top-level folder automatically.',
       'folderGroups', 'Projects\nAreas\nResources');
+
+    new Setting(containerEl).setName('Display').setHeading();
+    new Setting(containerEl)
+      .setName('Node style')
+      .setDesc('Classic draws every note as a glowing disc. Planets keeps the suns and hubs classic and renders every smaller note as a shaded planet lit by the galaxy core.')
+      .addDropdown((d) => d
+        .addOption('disc', 'Classic')
+        .addOption('planet', 'Planets')
+        .setValue(this.plugin.settings.nodeStyle || 'disc')
+        .onChange(async (v) => {
+          this.plugin.settings.nodeStyle = v;
+          await this.plugin.saveSettings();
+          // keep the on-canvas panel's copy of this control in step
+          for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+            if (leaf.view && leaf.view._styleSelect) leaf.view._styleSelect.value = v;
+          }
+        }));
+    new Setting(containerEl)
+      .setName('Corona')
+      .setDesc('Flare the suns and hubs with a layered bloom and ray spikes in their own color. Rides on top of the glow setting; suns burn brighter than hubs.')
+      .addToggle((t) => t
+        .setValue(!!this.plugin.settings.corona)
+        .onChange(async (v) => {
+          this.plugin.settings.corona = v;
+          await this.plugin.saveSettings();
+          for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+            if (leaf.view && leaf.view._coronaCheck) leaf.view._coronaCheck.checked = v;
+          }
+        }));
+    new Setting(containerEl)
+      .setName('Corona strength')
+      .setDesc('How far the corona reaches.')
+      .addSlider((sl) => sl
+        .setLimits(0.2, 2.5, 0.05)
+        .setValue(this.plugin.settings.coronaStrength === undefined ? 1 : this.plugin.settings.coronaStrength)
+        .setDynamicTooltip()
+        .onChange(async (v) => {
+          this.plugin.settings.coronaStrength = v;
+          await this.plugin.saveSettings();
+          for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+            if (leaf.view && leaf.view._coronaSlider) leaf.view._coronaSlider.value = v;
+          }
+        }));
+
+    new Setting(containerEl).setName('Tilted view').setHeading();
+    new Setting(containerEl)
+      .setName('Idle drift')
+      .setDesc('In the tilted views, slowly rotate the galaxy after a few hands-off seconds. Any interaction pauses it.')
+      .addToggle((t) => t
+        .setValue(this.plugin.settings.idleSpin)
+        .onChange(async (v) => {
+          this.plugin.settings.idleSpin = v;
+          await this.plugin.saveSettings();
+        }));
   }
 }
 
@@ -1043,6 +1444,10 @@ class VaultGalaxyPlugin extends Plugin {
       ...DEFAULT_SETTINGS, ...(this.data.settings || {}),
       colors: { ...((this.data.settings || {}).colors || {}) },
     };
+    // earlier builds stored the tilt as a boolean
+    if (typeof this.settings.tilt === 'boolean') this.settings.tilt = this.settings.tilt ? 'tilt' : 'flat';
+    // earlier builds had 'star' and 'hybrid' node styles; both fold into planets
+    if (this.settings.nodeStyle === 'star' || this.settings.nodeStyle === 'hybrid') this.settings.nodeStyle = 'planet';
   }
 
   async saveSettings() {
