@@ -1,6 +1,6 @@
 'use strict';
 
-/* Vault Galaxy 1.1.1 — your vault as a living orbital galaxy.
+/* Vault Galaxy 1.1.2 — your vault as a living orbital galaxy.
  *
  * Core idea: choreographed orbits, not simulated gravity. Every node gets an
  * assigned parent, radius, speed and phase -> deterministic ellipses that read

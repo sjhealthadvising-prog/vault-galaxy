@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
-  attestations: write
 
 jobs:
   release:
@@ -25,13 +23,15 @@ jobs:
             exit 1
           fi
 
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: |
-            main.js
-            manifest.json
-            styles.css
+      # NOTE: build-provenance attestation was removed deliberately (2026-07-17).
+      # The attestations we produced verified cleanly with GitHub's own tooling
+      # (`gh attestation verify` passed against the released assets, signed by
+      # this repo's workflow, built from the exact tagged commit) — but the
+      # Obsidian store's verifier rejected them as "invalid or does not match
+      # this repository", which HARD-FAILS the listing review. Attestations are
+      # only an advisory nice-to-have there, so shipping without them trades a
+      # blocking failure for a harmless recommendation. Revisit if the store's
+      # verifier changes.
 
       - name: Publish release
         env:
