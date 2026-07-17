@@ -2,15 +2,28 @@
 
 See your Obsidian vault as a living galaxy. Your most important notes are suns at the center; hub notes orbit them as orange stars; every other note orbits whatever it's most linked to. Orbit distance means something: **the more links a note shares with its parent, the tighter its orbit**. Everything moves — and everything you see is your real link structure.
 
-![Vault Galaxy — grab a sun and watch your knowledge web ring](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/hero.gif)
+![The tilted galaxy view — diving from the whole galaxy down to its burning core](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/hero-steep.gif)
+
+*The tilted view, coronas on — from the whole galaxy down to the suns and their orbiting notes.*
+
+![The classic top-down view — zooming into the core, out of the box](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/hero-classic.gif)
+
+*The classic top-down view — exactly what a fresh install looks like.*
 
 ## Highlights
 
 - **Two view modes** — *galaxy* (default): unlinked notes fill a rotating spiral disc around the core, arms shearing under Kepler-style differential rotation. *expand*: each folder becomes its own labeled satellite cluster for browsing by category.
+- **Tilted camera + coronas** — cycle the camera from flat to two cinematic pitches (the simulation stays 2D; only the camera tilts), and flare the suns and hubs with layered, spiked coronas. A *Planets* node style renders every leaf note as a shaded planet lit by the stars around it.
 - **Physics you can feel** — grab any node and drag it: its linked neighbors are tugged toward it (coupling strength scales with link weight), second-order neighbors less, and the whole disturbed web springs back and re-neutralizes when you let go. Unlinked notes don't budge — what ripples *is* your link graph.
 - **Content-weighted sizes** — within each tier, node size ranks by file size. A hierarchy rule keeps it readable: the fattest note never outgrows the smallest hub, and no hub outgrows a sun.
 - **Constellations** — links draw as faint lines; hover a note to light up its constellation, slow time, and see neighbor names. Click to open the note.
 - **Fully tunable** — gravity (contracts every orbit, Kepler-consistently speeding them up), rotation speed, spiral arm count, node size, glow, link thickness/brightness, label fade threshold, and per-group colors — all live, from the ⚙ panel in the view.
+
+## Grab a sun
+
+Every node is grabbable. Pull a sun off-orbit and its whole linked web is dragged along, then rings back like a pendulum when you let go:
+
+![Vault Galaxy — grab a sun and watch your knowledge web ring](https://raw.githubusercontent.com/sjhealthadvising-prog/vault-galaxy/main/docs/hero.gif)
 
 ## Hover: the web answers
 

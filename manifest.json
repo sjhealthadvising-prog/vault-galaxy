@@ -1,9 +1,9 @@
 {
   "id": "vault-galaxy",
   "name": "Vault Galaxy",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "minAppVersion": "1.5.0",
-  "description": "View your vault as a living galaxy: your most-linked notes become suns, hubs orbit them, and every note orbits what it links to — with grabbable, link-coupled spring physics.",
+  "description": "View your vault as a living galaxy: your most-linked notes become suns, hubs orbit them, and every note orbits what it links to \u2014 with grabbable, link-coupled spring physics.",
   "author": "Samer Jaber",
   "authorUrl": "https://github.com/sjhealthadvising-prog",
   "isDesktopOnly": false
