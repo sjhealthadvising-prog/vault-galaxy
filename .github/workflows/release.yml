@@ -38,6 +38,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" main.js manifest.json styles.css \
-            --title "$TAG" --generate-notes \
-          || gh release upload "$TAG" main.js manifest.json styles.css --clobber
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — refreshing assets."
+            gh release upload "$TAG" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$TAG" main.js manifest.json styles.css \
+              --title "$TAG" --generate-notes
+          fi

@@ -1,5 +1,4 @@
 node_modules/
 harness/vault-data.json
 data.json
-.claude/
 .DS_Store
