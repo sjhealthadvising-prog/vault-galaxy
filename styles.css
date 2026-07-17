@@ -1,3 +1,5 @@
+/* Vault Galaxy 1.1.1 */
+
 /* Both selectors out-specify Obsidian's default .view-content padding, so the
    canvas sits flush without !important. */
 .workspace-leaf-content[data-type='vault-galaxy-view'] .view-content,
