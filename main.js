@@ -10,7 +10,11 @@
  *
  * On top of the orbits sits a coupled displacement field: grab any node and
  * drag it — its linked neighbors are tugged toward it (spring stiffness scales
- * with link weight); release and the disturbed web wobbles back to rest.
+ * with link weight); release and the node settles wherever its links balance
+ * against the drop point, then adopts that spot as a brand-new orbit. Links
+ * ARE gravity: an unlinked note stays where you leave it, a lightly linked
+ * note is tugged partway back toward its constellation, and a heavily linked
+ * hub is genuinely reclaimed by its cluster.
  */
 
 const { Plugin, ItemView, TFile, Notice, PluginSettingTab, Setting } = require('obsidian');
@@ -57,6 +61,13 @@ const PHYS = {
   F_CAP: 1500,  // per-node force clamp (stability guard, not a tuning knob)
   V_CAP: 900,   // velocity clamp — also the max throw speed
   MASS: { sun: 10, hub: 3.5, note: 1, archive: 0.8 },
+  // release-to-new-equilibrium: a released node settles where its links
+  // balance against the drop anchor, then adopts that point as a new orbit
+  SETTLE_FLY: 40,   // speed above which the anchor still follows a thrown node
+  SETTLE_V: 3,      // spring speed below which a released node counts as calm
+  SETTLE_T: 0.35,   // seconds of calm before the stop point becomes home
+  SETTLE_SLIDE: 25, // speed below which the home starts gliding to the node
+  SETTLE_RATE: 0.35, // home-glide rate (1/s) — the family drifts, never erupts
 };
 
 // galaxy-mode disc: unlinked notes seeded along spiral arms that shear
@@ -85,21 +96,21 @@ const DEFAULT_SETTINGS = {
   folderGroups: '',   // one folder per line for colored clusters; empty = top-level folders
   // --- view
   mode: 'galaxy',     // 'galaxy' | 'expand'
-  tilt: 'flat',       // camera pitch: 'flat' (2D) | 'tilt' | 'steep'
+  tilt: 'steep',      // camera pitch: 'flat' (2D) | 'tilt' | 'steep'
   idleSpin: true,     // tilted views only: slow auto-drift after a few idle seconds
   nodeStyle: 'disc',  // 'disc' (classic) | 'planet' (leaf notes as planets lit by the core)
-  corona: false,      // flaring corona on the suns and hubs (rides on the glow setting)
-  coronaStrength: 1,  // how far the corona reaches
-  gravity: 1,         // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
-  bounciness: 0.6,    // 0 = grabbed nodes return dead, 1 = long pendulum ring (damping ratio)
-  speed: 1,           // rotation speed multiplier
-  arms: 3,            // spiral arms (galaxy mode)
-  nodeSize: 1,        // node radius multiplier
-  sunLabels: true,    // core names always on; off = fade in on zoom like everything else
-  labelZoom: 1,       // label fade threshold: higher = must zoom in further before names appear
-  glow: 1,            // glow intensity (0 disables the glow pass)
-  linkWidth: 1,       // constellation line thickness
-  linkAlpha: 1,       // constellation line brightness
+  corona: true,       // flaring corona on the suns and hubs (rides on the glow setting)
+  coronaStrength: 2.15, // how far the corona reaches
+  gravity: 1.48,      // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
+  bounciness: 1,      // 0 = grabbed nodes return dead, 1 = long pendulum ring (damping ratio)
+  speed: 0.5,         // rotation speed multiplier
+  arms: 6,            // spiral arms (galaxy mode)
+  nodeSize: 0.65,     // node radius multiplier
+  sunLabels: false,   // core names always on; off = fade in on zoom like everything else
+  labelZoom: 3,       // label fade threshold: higher = must zoom in further before names appear
+  glow: 0.3,          // glow intensity (0 disables the glow pass)
+  linkWidth: 1.3,     // constellation line thickness
+  linkAlpha: 3,       // constellation line brightness
   colors: {},         // per-tier/per-group overrides, e.g. { core: '#ffd54a', 'g:Projects': '#5fdd8f' }
 };
 
@@ -177,7 +188,7 @@ function buildModel(app, settings) {
       z0: 0, pf: 1, depth: 0, // tilted-view layer offset + projected size/order
       ox: 0, oy: 0, vx: 0, vy: 0, // grab-offset + spring velocity (world units)
       nx: 0, ny: 0, fx: 0, fy: 0, // natural position + coupling force accumulators
-      isAnchor: false,
+      isAnchor: false, settling: false, settleBlend: 0,
     });
   }
 
@@ -229,6 +240,7 @@ function buildModel(app, settings) {
   const adopt = (child, parent) => { child.parent = parent; parent.children.push(child); };
   const setOrbit = (n, r, K, phase) => {
     n.orbitR = r; // base radius; the view scales it live by gravity
+    n.speedK = K; // kept so a re-homed node gets its Kepler speed recomputed
     const vary = 0.9 + 0.2 * rand01(n.seed ^ 0xA5A5);
     n.omega = (K / Math.pow(Math.max(r, 8), 1.5)) * vary;
     n.phase = phase;
@@ -247,6 +259,8 @@ function buildModel(app, settings) {
   suns.sort((a, b) => b.wdeg - a.wdeg);
   const central = suns[0];
   central.parent = null; central.orbitR = 0; central.omega = 0;
+  central.speedK = SPEED_K.core;
+  central.hx = 0; central.hy = 0; // parentless: home is a point, not an orbit
   for (let i = 1; i < suns.length; i++) {
     const ring = Math.floor((i - 1) / 4);
     const r = 115 + ring * 85 + (i % 2) * 14;
@@ -292,7 +306,7 @@ function buildModel(app, settings) {
       wdeg: 0, adj: new Map(), parent: null, children: [], isAnchor: true,
       orbitR: 0, omega: 0, phase: 0, theta: 0, x: 0, y: 0, drawR: 0,
       z0: 0, pf: 1, depth: 0,
-      ox: 0, oy: 0, vx: 0, vy: 0, nx: 0, ny: 0, fx: 0, fy: 0,
+      ox: 0, oy: 0, vx: 0, vy: 0, nx: 0, ny: 0, fx: 0, fy: 0, settling: false, settleBlend: 0,
     };
     adopt(a, central);
     setOrbit(a, 560 + (i % 2) * 90, SPEED_K.anchor, (i / present.length) * 2 * Math.PI + rand01(a.seed) * 0.4);
@@ -301,34 +315,57 @@ function buildModel(app, settings) {
   });
 
   // --- everything else: orbit best-linked hub, else best-linked sun, else the
-  //     group anchor (expand) or the spiral disc (galaxy)
+  //     group anchor (expand) or the spiral disc (galaxy).
+  //     Links are gravity for the rank-and-file too: an ordinary note's orbit
+  //     radius shrinks with its total link degree on a log scale (normalized
+  //     to the vault's most-linked ordinary note), so a heavily-linked note
+  //     hugs its parent while a one-link note rides the outer lanes. Degree
+  //     drives it; the hash still sets the angle and jitter.
+  let ordMax = 1;
+  for (const n of nodes.values()) {
+    if (n.isAnchor || sunSet.has(n.path) || hubSet.has(n.path) || n.tier === 'archive') continue;
+    if (n.wdeg > ordMax) ordMax = n.wdeg;
+  }
+  const degLogMax = Math.log(1 + ordMax);
+  const degT = (n) => Math.log(1 + n.wdeg) / degLogMax; // 0 (no links) .. 1 (most-linked)
+
   const leafCount = new Map(); // parent path -> count so far (for sunflower spacing)
   const placeLeaf = (n, parent, tight) => {
     const idx = leafCount.get(parent.path) || 0;
     leafCount.set(parent.path, idx + 1);
     const grow = tight ? 8 : 11;
     const base = tight ? 42 : parent.isAnchor ? 20 : 24;
+    // the sunflower ladder still spaces the crowd, but degree compresses it:
+    // the most-linked notes get the innermost rungs (placement is degree-
+    // sorted below) AND the whole ladder shrinks for them
+    const hug = 1 - 0.85 * degT(n);
     adopt(n, parent);
-    setOrbit(n, base + grow * Math.sqrt(idx) + rand01(n.seed ^ 7) * 4, SPEED_K.leaf, idx * GOLDEN + rand01(n.seed) * 0.4);
+    setOrbit(n, base + (grow * Math.sqrt(idx) + rand01(n.seed ^ 7) * 4) * hug, SPEED_K.leaf, idx * GOLDEN + rand01(n.seed) * 0.4);
   };
 
+  const pending = []; // [node, parent, tight] — placed most-linked first
   for (const n of nodes.values()) {
     if (n.parent || n === central || n.isAnchor) continue;
     if (n.tier === 'archive') {
+      // archive override stands: rim debris regardless of links
       adopt(n, central);
       setOrbit(n, 760 + rand01(n.seed) * 90, SPEED_K.archive, rand01(n.seed ^ 99) * 2 * Math.PI);
       continue;
     }
     const asHubChild = bestParent(n, hubs);
-    if (asHubChild.bw > 0) { placeLeaf(n, asHubChild.best, false); continue; }
+    if (asHubChild.bw > 0) { pending.push([n, asHubChild.best, false]); continue; }
     const asSunChild = bestParent(n, suns);
-    if (asSunChild.bw > 0) { placeLeaf(n, asSunChild.best, true); continue; }
+    if (asSunChild.bw > 0) { pending.push([n, asSunChild.best, true]); continue; }
     if (mode === 'expand') {
-      placeLeaf(n, anchors.get(n.tier) || anchors.get('other') || central, false);
+      pending.push([n, anchors.get(n.tier) || anchors.get('other') || central, false]);
     } else {
-      // galaxy disc: denser toward the center, seeded on spiral arms
+      // galaxy disc: denser toward the center, seeded on spiral arms; linked
+      // notes (linked only sideways, not to any hub or sun) pull inward with
+      // degree — the WHOLE radius scales, so a heavily-linked pile note can
+      // cross the disc rim and ride the core (distance from center encodes
+      // connectedness); unlinked dust keeps today's full spread
       const u = rand01(n.seed ^ 5);
-      const r = DISC_INNER + DISC_SPAN * Math.pow(u, 1.6); // density falls off with radius
+      const r = (DISC_INNER + DISC_SPAN * Math.pow(u, 1.6)) * (1 - 0.8 * degT(n)); // density falls off with radius
       const nArms = Math.max(1, settings.arms || 3);
       const arm = n.seed % nArms;
       const phase = arm * (2 * Math.PI / nArms) + r * DISC_TWIST + (rand01(n.seed ^ 11) - 0.5) * 0.6;
@@ -336,6 +373,10 @@ function buildModel(app, settings) {
       setOrbit(n, r, SPEED_K.disc, phase);
     }
   }
+  // heavy notes claim the inner rungs: place each parent's brood most-linked
+  // first (path as the deterministic tiebreak)
+  pending.sort((p, q) => q[0].wdeg - p[0].wdeg || (p[0].path < q[0].path ? -1 : 1));
+  for (const [n, parent, tight] of pending) placeLeaf(n, parent, tight);
 
   // --- draw radii: content-sized within strict tier bands. A fat note can
   //     never outgrow the tier above it (hierarchy beats content). Sizes are
@@ -424,6 +465,7 @@ class GalaxyView extends ItemView {
     this.planetCache = new Map();
     this._resolvedOnce = false;
     this._drag = null;
+    this._settle = new Map(); // path -> release record (re-homing in flight)
   }
 
   get settings() { return this.plugin.settings; }
@@ -499,7 +541,9 @@ class GalaxyView extends ItemView {
     this.registerDomEvent(this.canvas, 'pointermove', (e) => this.onPointerMove(e));
     this.registerDomEvent(this.canvas, 'pointerup', (e) => this.onPointerUp(e));
     this.registerDomEvent(this.canvas, 'pointerleave', () => {
-      this._nodeDrag = null; // released off-canvas: spring home
+      // released off-canvas: a plain drop, no throw — settle from right here
+      if (this._nodeDrag && this._nodeDrag.moved) this.beginSettle(this._nodeDrag.node);
+      this._nodeDrag = null;
       this.hover = null; this.hoverSet = null;
     });
 
@@ -645,13 +689,14 @@ class GalaxyView extends ItemView {
     try {
       this.model = buildModel(this.app, this.settings);
       this.order = [...this.model.nodes.values()];
+      this._settle.clear(); // session re-homes die with the old model
       if (this.linkMode === 'auto' || this.linkMode === 'all' || this.linkMode === 'hover') {
         const auto = this.model.edges.length > 2600 ? 'hover' : 'all';
         if (this.linkMode === 'auto') this.linkMode = auto;
         this.btnLinks.setText('links: ' + this.linkMode);
       }
       const nNotes = [...this.model.nodes.values()].filter((n) => !n.isAnchor).length;
-      this.statusEl.setText(`${this.settings.mode} · ${nNotes} notes · ${this.model.edges.length} links · hover to inspect · click to open · drag to disturb`);
+      this.statusEl.setText(`${this.settings.mode} · ${nNotes} notes · ${this.model.edges.length} links · hover to inspect · click to open · drag to rearrange`);
       if (!this.stars) this.makeStars();
     } catch (e) {
       console.error('[vault-galaxy] build failed', e);
@@ -714,7 +759,9 @@ class GalaxyView extends ItemView {
     this.lastInput = performance.now();
     this.updateHover(mx, my);
     if (this.hover && !this.hover.isAnchor) {
-      // grab the node: drag it anywhere, throw it, gravity reels it home.
+      // grab the node: drag it anywhere, throw it — on release its links
+      // decide where it settles and re-homes (a node mid-settle can simply be
+      // grabbed again; its record is refreshed on the next release).
       // Pointer positions are cast onto the node's own plane layer, so the
       // identical world-space grab math drives both the flat and tilted views.
       const n = this.hover;
@@ -769,7 +816,7 @@ class GalaxyView extends ItemView {
   onPointerUp(e) {
     if (this._nodeDrag) {
       const nd = this._nodeDrag;
-      this._nodeDrag = null; // spring takes over from here
+      this._nodeDrag = null; // the settle takes over from here
       this.canvas.style.cursor = 'pointer';
       if (!nd.moved && !nd.node.isAnchor) {
         const file = this.app.vault.getAbstractFileByPath(nd.node.path);
@@ -780,10 +827,89 @@ class GalaxyView extends ItemView {
         const stale = performance.now() - nd.lastT > 100;
         nd.node.vx = stale ? 0 : clamp(nd.tvx);
         nd.node.vy = stale ? 0 : clamp(nd.tvy);
+        this.beginSettle(nd.node);
       }
       return;
     }
     this._drag = null;
+  }
+
+  // release-to-new-equilibrium: from here the node's links — not its old
+  // seat — decide where it comes to rest. The home spring is re-aimed at the
+  // release point (the drop anchor), and each of the node's links becomes a
+  // position-space spring whose rest length is frozen at the current natural
+  // separation, so a constellation can reclaim its node without ever
+  // collapsing onto itself (compression pushes back just as stretch pulls).
+  // A genuine throw outruns the anchor: while the node is faster than
+  // SETTLE_FLY the anchor follows it (gliding under links + damping only),
+  // then plants where the throw dies and the leftover energy rings there.
+  beginSettle(n) {
+    const m = this.model;
+    if (!m) return;
+    for (const e of m.edges) {
+      if (e.a !== n.path && e.b !== n.path) continue;
+      const a = m.nodes.get(e.a), b = m.nodes.get(e.b);
+      if (a && b) e.rest = Math.hypot(a.nx - b.nx, a.ny - b.ny);
+    }
+    n.settling = true;
+    n.settleBlend = 0; // 0 = pure release physics, 1 = ordinary field again
+    this._settle.set(n.path, {
+      node: n, ax: n.ox, ay: n.oy, calm: 0, age: 0, sliding: false,
+      flying: Math.hypot(n.vx, n.vy) > PHYS.SETTLE_FLY,
+    });
+    this._excited = true;
+  }
+
+  // re-aim the node's orbit so its natural position lands on (px, py): a
+  // fresh radius and phase around the SAME parent, with the Kepler speed
+  // recomputed for the new radius. The radius floor is wider than the
+  // build-time one on purpose — a node dropped right ON its parent must not
+  // adopt a subframe-period orbit and buzz there forever.
+  setHomeAt(n, px, py) {
+    const par = n.parent;
+    if (par) {
+      const rx = px - par.nx, ry = py - par.ny;
+      n.orbitR = Math.hypot(rx, ry) * this.gLive; // base radius (view divides by live gravity)
+      n.theta = Math.atan2(ry, rx);
+      n.phase = n.theta;
+      const vary = 0.9 + 0.2 * rand01(n.seed ^ 0xA5A5); // same spread the build uses
+      n.omega = ((n.speedK || SPEED_K.leaf) / Math.pow(Math.max(n.orbitR, 48), 1.5)) * vary;
+    } else {
+      n.hx = px; n.hy = py; // the central sun: its point-home moves instead
+    }
+    n.nx = px; n.ny = py;
+  }
+
+  // children nest on the parent's natural position, so when a home moves by
+  // (dx, dy) the whole subtree's frame moves with it: shift the naturals in
+  // step (next frame's BFS recomputes the same values) so this frame renders
+  // seamlessly, and counter the offsets so the family flows over on its
+  // springs instead of teleporting. A descendant mid-settle keeps its drop
+  // anchor pinned in world space.
+  nudgeKids(n, dx, dy) {
+    const stack = [...n.children];
+    while (stack.length) {
+      const c = stack.pop();
+      c.nx += dx; c.ny += dy;
+      c.ox -= dx; c.oy -= dy;
+      if (c.settling) {
+        const rec = this._settle.get(c.path);
+        if (rec) { rec.ax -= dx; rec.ay -= dy; }
+      }
+      for (const cc of c.children) stack.push(cc);
+    }
+  }
+
+  // final adoption: by the time the calm gate fires, the home glide (frame
+  // loop) has already walked the natural frame to the node, so the leftover
+  // jump here is at most a ring-amplitude — never a whole-family impulse.
+  adoptHome(n) {
+    const dx = n.ox, dy = n.oy; // how far the natural frame still has to move
+    this.setHomeAt(n, n.nx + dx, n.ny + dy);
+    n.ox = n.oy = n.vx = n.vy = 0;
+    if (n.children.length && (dx || dy)) this.nudgeKids(n, dx, dy);
+    n.settling = false;
+    this._settle.delete(n.path);
   }
 
   // cast a screen point back through the camera onto the simulation plane
@@ -995,7 +1121,7 @@ class GalaxyView extends ItemView {
       n.nx = pnx + r * Math.cos(n.theta);
       n.ny = pny + r * Math.sin(n.theta);
     };
-    stepNode(m.central, 0, 0); // orbitR 0 -> natural position is the origin
+    stepNode(m.central, m.central.hx || 0, m.central.hy || 0); // orbitR 0 -> natural position is the point-home (the origin until re-homed)
     const queue = [m.central];
     while (queue.length) {
       const p = queue.pop();
@@ -1010,6 +1136,9 @@ class GalaxyView extends ItemView {
     // weight). Drag one node and its constellation is tugged toward it,
     // second-order neighbors less; release (or THROW) and the web swings —
     // pendulum overshoot, energy sloshing between neighbors — then re-rests.
+    // A RELEASED node is the exception: its home spring aims at the drop
+    // anchor and its links run on frozen rest lengths until it settles and
+    // adopts a new orbit (see beginSettle/adoptHome).
     if (this._excited) {
       // bounciness -> damping ratio: 0 -> ~critically damped (dead return),
       // 1 -> zeta 0.08 (long ring). Default 0.6 -> zeta ~0.22, 4-5 swings.
@@ -1029,9 +1158,42 @@ class GalaxyView extends ItemView {
           n.fx = -PHYS.K_HOME * n.ox;
           n.fy = -PHYS.K_HOME * n.oy;
         }
+        // settling nodes: re-aim the home spring at the release anchor
+        // instead of the old seat. A thrown node outruns the anchor — it
+        // trails the node while the throw lives, then plants for good.
+        for (const rec of this._settle.values()) {
+          const n = rec.node;
+          if (rec.flying) {
+            if (Math.hypot(n.vx, n.vy) > PHYS.SETTLE_FLY) { rec.ax = n.ox; rec.ay = n.oy; }
+            else rec.flying = false; // the throw died: the anchor plants here
+          }
+          n.fx += PHYS.K_HOME * rec.ax;
+          n.fy += PHYS.K_HOME * rec.ay;
+        }
         for (const e of m.edges) {
           const a = m.nodes.get(e.a), b2 = m.nodes.get(e.b);
           if (!a || !b2) continue;
+          if (a.settling || b2.settling) {
+            // a re-homing endpoint: spring on the ACTUAL separation, rest
+            // length frozen at release — stretch reclaims the node toward
+            // its constellation, compression pushes back (no collapse). As
+            // the release settles this cross-fades (w -> 1) back into the
+            // ordinary offset-space spring, so retiring the record never
+            // drops a force step into the web: orbital motion re-tensions a
+            // frozen rest length indefinitely, and dumping that standing
+            // tension in one frame was the idle-"shake" eruption.
+            const w = Math.min(a.settling ? a.settleBlend : 1, b2.settling ? b2.settleBlend : 1);
+            const dxp = (a.nx + a.ox) - (b2.nx + b2.ox), dyp = (a.ny + a.oy) - (b2.ny + b2.oy);
+            const d = Math.hypot(dxp, dyp);
+            let fx = w * e.k * (a.ox - b2.ox), fy = w * e.k * (a.oy - b2.oy);
+            if (d > 1e-6 && w < 1) {
+              const fr = (1 - w) * e.k * (d - e.rest) / d;
+              fx += fr * dxp; fy += fr * dyp;
+            }
+            a.fx -= fx; a.fy -= fy;
+            b2.fx += fx; b2.fy += fy;
+            continue;
+          }
           const dx = a.ox - b2.ox, dy = a.oy - b2.oy;
           if (!dx && !dy) continue;
           b2.fx += e.k * dx; b2.fy += e.k * dy;
@@ -1053,7 +1215,61 @@ class GalaxyView extends ItemView {
           energy += Math.abs(n.ox) + Math.abs(n.oy) + Math.abs(n.vx) + Math.abs(n.vy);
         }
       }
-      if (!this._nodeDrag && energy < 8) {
+      // a released node has settled once its spring velocity stays calm for
+      // a beat (a ring's turning points pass through v=0 too fast to count):
+      // wherever it stopped becomes its new home and orbit. The adoption is
+      // AMORTIZED: once the node slows down, its home glides toward it a
+      // little each frame — the family drifts along continuously, instead of
+      // taking the whole displacement as one impulse seconds after the drag
+      // (that delayed eruption read as the galaxy spontaneously shaking).
+      for (const rec of this._settle.values()) {
+        const n = rec.node;
+        if (this._nodeDrag && this._nodeDrag.node === n) { rec.calm = 0; continue; }
+        rec.age += total;
+        const sp = Math.hypot(n.vx, n.vy);
+        // grace period before the glide: the main reclaim swing must play out
+        // first (a plain drop starts at speed 0, which would read as "slow")
+        if (!rec.flying && !rec.sliding && ((rec.age > 1.2 && sp < PHYS.SETTLE_SLIDE) || rec.age > 8)) rec.sliding = true;
+        if (rec.sliding) {
+          const f = 1 - Math.exp(-PHYS.SETTLE_RATE * total);
+          const dx = n.ox * f, dy = n.oy * f;
+          if (dx || dy) {
+            this.setHomeAt(n, n.nx + dx, n.ny + dy);
+            n.ox -= dx; n.oy -= dy;
+            rec.ax -= dx; rec.ay -= dy; // the anchor is a world point: keep it pinned
+            if (n.children.length) this.nudgeKids(n, dx, dy);
+          }
+          // anneal the static strain in the same breath: fade the anchor
+          // toward the node and cross-fade the link model back to the
+          // ordinary field. Both sides decay on one clock from a balanced
+          // state, so the settle point holds still and the adoption below
+          // releases no stored force — the strain-dump WAS the spontaneous
+          // "shake" (measured: KE 5k -> 1.4M twenty seconds after the last
+          // touch, fired by the calm gate long after the hand left).
+          rec.ax += (n.ox - rec.ax) * f;
+          rec.ay += (n.oy - rec.ay) * f;
+          n.settleBlend += (1 - n.settleBlend) * f;
+        }
+        rec.calm = sp < PHYS.SETTLE_V ? rec.calm + total : 0;
+        // adopt only once calm AND annealed — the anchor residual is a
+        // faithful proxy for the remaining strain (links anneal at the same
+        // rate), so the rebase releases nothing. If a long ring or orbital
+        // stirring keeps the node from ever reading calm, the 30s failsafe
+        // retires the record IN PLACE instead: by then the glide has walked
+        // the home to the swing center and the strain is annealed away, so
+        // the leftover ring hands off seamlessly to the ordinary field and
+        // damps out there. (Rebasing on this path would turn the mid-swing
+        // displacement into a whole-family impulse — the same eruption in
+        // a different coat.)
+        if (rec.calm >= PHYS.SETTLE_T && (n.settleBlend > 0.98 || !n.adj.size) &&
+            Math.hypot(rec.ax - n.ox, rec.ay - n.oy) < 1) {
+          this.adoptHome(n);
+        } else if (rec.age > 30) {
+          n.settling = false;
+          this._settle.delete(n.path);
+        }
+      }
+      if (!this._nodeDrag && !this._settle.size && energy < 8) {
         for (const n of m.nodes.values()) { n.ox = n.oy = n.vx = n.vy = 0; }
         this._excited = false;
       }
