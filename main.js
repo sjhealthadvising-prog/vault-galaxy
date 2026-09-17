@@ -85,21 +85,21 @@ const DEFAULT_SETTINGS = {
   folderGroups: '',   // one folder per line for colored clusters; empty = top-level folders
   // --- view
   mode: 'galaxy',     // 'galaxy' | 'expand'
-  tilt: 'flat',       // camera pitch: 'flat' (2D) | 'tilt' | 'steep'
+  tilt: 'steep',      // camera pitch: 'flat' (2D) | 'tilt' | 'steep'
   idleSpin: true,     // tilted views only: slow auto-drift after a few idle seconds
   nodeStyle: 'disc',  // 'disc' (classic) | 'planet' (leaf notes as planets lit by the core)
-  corona: false,      // flaring corona on the suns and hubs (rides on the glow setting)
-  coronaStrength: 1,  // how far the corona reaches
-  gravity: 1,         // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
-  bounciness: 0.6,    // 0 = grabbed nodes return dead, 1 = long pendulum ring (damping ratio)
-  speed: 1,           // rotation speed multiplier
-  arms: 3,            // spiral arms (galaxy mode)
-  nodeSize: 1,        // node radius multiplier
-  sunLabels: true,    // core names always on; off = fade in on zoom like everything else
-  labelZoom: 1,       // label fade threshold: higher = must zoom in further before names appear
-  glow: 1,            // glow intensity (0 disables the glow pass)
-  linkWidth: 1,       // constellation line thickness
-  linkAlpha: 1,       // constellation line brightness
+  corona: true,       // flaring corona on the suns and hubs (rides on the glow setting)
+  coronaStrength: 2.15, // how far the corona reaches
+  gravity: 1.48,      // orbit tightness; radii /= g, omega *= g^1.5 (Kepler-consistent)
+  bounciness: 1,      // 0 = grabbed nodes return dead, 1 = long pendulum ring (damping ratio)
+  speed: 0.5,         // rotation speed multiplier
+  arms: 6,            // spiral arms (galaxy mode)
+  nodeSize: 0.65,     // node radius multiplier
+  sunLabels: false,   // core names always on; off = fade in on zoom like everything else
+  labelZoom: 3,       // label fade threshold: higher = must zoom in further before names appear
+  glow: 0.3,          // glow intensity (0 disables the glow pass)
+  linkWidth: 1.3,     // constellation line thickness
+  linkAlpha: 3,       // constellation line brightness
   colors: {},         // per-tier/per-group overrides, e.g. { core: '#ffd54a', 'g:Projects': '#5fdd8f' }
 };
 
@@ -301,34 +301,57 @@ function buildModel(app, settings) {
   });
 
   // --- everything else: orbit best-linked hub, else best-linked sun, else the
-  //     group anchor (expand) or the spiral disc (galaxy)
+  //     group anchor (expand) or the spiral disc (galaxy).
+  //     Links are gravity for the rank-and-file too: an ordinary note's orbit
+  //     radius shrinks with its total link degree on a log scale (normalized
+  //     to the vault's most-linked ordinary note), so a heavily-linked note
+  //     hugs its parent while a one-link note rides the outer lanes. Degree
+  //     drives it; the hash still sets the angle and jitter.
+  let ordMax = 1;
+  for (const n of nodes.values()) {
+    if (n.isAnchor || sunSet.has(n.path) || hubSet.has(n.path) || n.tier === 'archive') continue;
+    if (n.wdeg > ordMax) ordMax = n.wdeg;
+  }
+  const degLogMax = Math.log(1 + ordMax);
+  const degT = (n) => Math.log(1 + n.wdeg) / degLogMax; // 0 (no links) .. 1 (most-linked)
+
   const leafCount = new Map(); // parent path -> count so far (for sunflower spacing)
   const placeLeaf = (n, parent, tight) => {
     const idx = leafCount.get(parent.path) || 0;
     leafCount.set(parent.path, idx + 1);
     const grow = tight ? 8 : 11;
     const base = tight ? 42 : parent.isAnchor ? 20 : 24;
+    // the sunflower ladder still spaces the crowd, but degree compresses it:
+    // the most-linked notes get the innermost rungs (placement is degree-
+    // sorted below) AND the whole ladder shrinks for them
+    const hug = 1 - 0.85 * degT(n);
     adopt(n, parent);
-    setOrbit(n, base + grow * Math.sqrt(idx) + rand01(n.seed ^ 7) * 4, SPEED_K.leaf, idx * GOLDEN + rand01(n.seed) * 0.4);
+    setOrbit(n, base + (grow * Math.sqrt(idx) + rand01(n.seed ^ 7) * 4) * hug, SPEED_K.leaf, idx * GOLDEN + rand01(n.seed) * 0.4);
   };
 
+  const pending = []; // [node, parent, tight] — placed most-linked first
   for (const n of nodes.values()) {
     if (n.parent || n === central || n.isAnchor) continue;
     if (n.tier === 'archive') {
+      // archive override stands: rim debris regardless of links
       adopt(n, central);
       setOrbit(n, 760 + rand01(n.seed) * 90, SPEED_K.archive, rand01(n.seed ^ 99) * 2 * Math.PI);
       continue;
     }
     const asHubChild = bestParent(n, hubs);
-    if (asHubChild.bw > 0) { placeLeaf(n, asHubChild.best, false); continue; }
+    if (asHubChild.bw > 0) { pending.push([n, asHubChild.best, false]); continue; }
     const asSunChild = bestParent(n, suns);
-    if (asSunChild.bw > 0) { placeLeaf(n, asSunChild.best, true); continue; }
+    if (asSunChild.bw > 0) { pending.push([n, asSunChild.best, true]); continue; }
     if (mode === 'expand') {
-      placeLeaf(n, anchors.get(n.tier) || anchors.get('other') || central, false);
+      pending.push([n, anchors.get(n.tier) || anchors.get('other') || central, false]);
     } else {
-      // galaxy disc: denser toward the center, seeded on spiral arms
+      // galaxy disc: denser toward the center, seeded on spiral arms; linked
+      // notes (linked only sideways, not to any hub or sun) pull inward with
+      // degree — the WHOLE radius scales, so a heavily-linked pile note can
+      // cross the disc rim and ride the core (distance from center encodes
+      // connectedness); unlinked dust keeps today's full spread
       const u = rand01(n.seed ^ 5);
-      const r = DISC_INNER + DISC_SPAN * Math.pow(u, 1.6); // density falls off with radius
+      const r = (DISC_INNER + DISC_SPAN * Math.pow(u, 1.6)) * (1 - 0.8 * degT(n)); // density falls off with radius
       const nArms = Math.max(1, settings.arms || 3);
       const arm = n.seed % nArms;
       const phase = arm * (2 * Math.PI / nArms) + r * DISC_TWIST + (rand01(n.seed ^ 11) - 0.5) * 0.6;
@@ -336,6 +359,10 @@ function buildModel(app, settings) {
       setOrbit(n, r, SPEED_K.disc, phase);
     }
   }
+  // heavy notes claim the inner rungs: place each parent's brood most-linked
+  // first (path as the deterministic tiebreak)
+  pending.sort((p, q) => q[0].wdeg - p[0].wdeg || (p[0].path < q[0].path ? -1 : 1));
+  for (const [n, parent, tight] of pending) placeLeaf(n, parent, tight);
 
   // --- draw radii: content-sized within strict tier bands. A fat note can
   //     never outgrow the tier above it (hierarchy beats content). Sizes are
